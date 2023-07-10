@@ -37,7 +37,7 @@ from tqdm.auto import tqdm
 from transformers import CLIPTextModel, CLIPTokenizer
 from torchvision import transforms
 from pathlib import Path
-from utils import parse_args
+from utils.utils import parse_args
 
 from model import PartDiffusion
 

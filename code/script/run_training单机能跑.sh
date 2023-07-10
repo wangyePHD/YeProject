@@ -1,4 +1,4 @@
-export WANDB_NAME=postfuse-localize-ffhq-1_5-1e-5
+export WANDB_NAME=PartDiffusion
 export WANDB_DISABLE_SERVICE=true
 
 
