@@ -281,30 +281,24 @@ class PartDiffusion(nn.Module):
 
         denoise_loss = F.mse_loss(pred.float(), target.float(), reduction="mean")
         
-        import ipdb
-        ipdb.set_trace()
-
+   
         return_dict = {"denoise_loss": denoise_loss}
 
 
-# note test case
+# # note test case
+# from utils import parse_args
+# args = parse_args()
+# noise_scheduler = DDPMScheduler.from_pretrained(
+#         args.pretrained_model_name_or_path, subfolder="scheduler"
+#     )
+# model = PartDiffusion.from_pretrained(args)
+# input_ids = torch.randint(1,100,(1,77))
+# pixel_values = torch.rand((1,3,224,224))
+# wheel_pixel = torch.rand((1,1,3,224,224))
+# batch = {
+#     'input_ids': input_ids,
+#     'pixel_values': pixel_values,
+#     'wheel_pixel': wheel_pixel
+# }
+# model(batch,noise_scheduler)
 
-from utils import parse_args
-args = parse_args()
-
-
-noise_scheduler = DDPMScheduler.from_pretrained(
-        args.pretrained_model_name_or_path, subfolder="scheduler"
-    )
-
-model = PartDiffusion.from_pretrained(args)
-input_ids = torch.randint(1,100,(1,77))
-pixel_values = torch.rand((1,3,224,224))
-wheel_pixel = torch.rand((1,1,3,224,224))
-
-batch = {
-    'input_ids': input_ids,
-    'pixel_values': pixel_values,
-    'wheel_pixel': wheel_pixel
-}
-model(batch,noise_scheduler)
