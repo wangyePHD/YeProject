@@ -1,0 +1,11 @@
+07/10/2023 04:08:44 - INFO - __main__ - Distributed environment: DistributedType.NO
+Num processes: 1
+Process index: 0
+Local process index: 0
+Device: cuda
+
+Mixed precision type: bf16
+
+07/10/2023 04:08:44 - INFO - __main__ - Set random seed as 42
+07/10/2023 04:08:55 - INFO - __main__ - Success for loading components and model!
+07/10/2023 04:08:55 - INFO - __main__ - The mixed precision is torch.bfloat16

@@ -85,7 +85,7 @@ def parse_args(default=False):
         help="The directory where the downloaded models and datasets will be stored.",
     )
     parser.add_argument(
-        "--seed", type=int, default=None, help="A seed for reproducible training."
+        "--seed", type=int, default=2023, help="A seed for reproducible training."
     )
 
     parser.add_argument(

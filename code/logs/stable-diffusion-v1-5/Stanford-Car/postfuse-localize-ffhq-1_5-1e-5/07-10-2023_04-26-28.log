@@ -1,0 +1,16 @@
+07/10/2023 04:26:28 - INFO - __main__ - Distributed environment: DistributedType.NO
+Num processes: 1
+Process index: 0
+Local process index: 0
+Device: cuda
+
+Mixed precision type: bf16
+
+07/10/2023 04:26:28 - INFO - __main__ - Set random seed as 42
+07/10/2023 04:26:39 - INFO - __main__ - Success for loading components and model!
+07/10/2023 04:26:39 - INFO - __main__ - The mixed precision is torch.bfloat16
+07/10/2023 04:26:40 - INFO - __main__ - The requires_grad of all the params is False
+07/10/2023 04:26:40 - INFO - __main__ - The data type of all the params is torch.bfloat16
+07/10/2023 04:26:41 - INFO - __main__ - Unfreezing the UNet params
+07/10/2023 04:26:41 - INFO - __main__ - Unfreezing the partial params of image encoder
+07/10/2023 04:26:41 - INFO - __main__ - Unfreezing the partial params of image encoder

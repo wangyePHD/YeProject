@@ -83,6 +83,9 @@ def define_logger(args, accelerator):
         else [],
     )
 
+def set_random_seed(args):
+    set_seed(args.seed)
+
 
 
 def train():
@@ -96,7 +99,133 @@ def train():
     
     logger.info(accelerator.state, main_process_only=True)
 
+    # note set random seed
+    set_random_seed(args)
+    logger.info("Set random seed as "+str(args.seed))
+
+    # note loading model components
+    noise_scheduler = DDPMScheduler.from_pretrained(
+        args.pretrained_model_name_or_path, subfolder="scheduler"
+    )
+    tokenizer = CLIPTokenizer.from_pretrained(
+        args.pretrained_model_name_or_path,
+        subfolder="tokenizer",
+        revision=args.revision,
+    )
+    model = PartDiffusion.from_pretrained(args)
+    logger.info("Success for loading components and model!")
+
+    # note judge whether to use mixed precision
+    if accelerator.mixed_precision == "fp16":
+        weight_dtype = torch.float16
+    elif accelerator.mixed_precision == "bf16":
+        weight_dtype = torch.bfloat16
+    else:
+        weight_dtype = torch.float32
+    logger.info("The mixed precision is "+str(weight_dtype))
+
+    # note freeze all params of model
+    for param in model.parameters():
+        param.requires_grad = False
+        param.data = param.data.to(weight_dtype)
     
+    logger.info("The requires_grad of all the params is False")
+    logger.info("The data type of all the params is "+str(weight_dtype))
+
+    # note unfreeze unet
+    model.unet.requires_grad_(True)
+    model.unet.to(torch.float32)
+    logger.info("Unfreezing the UNet params")
+
+    if args.train_text_encoder: # note 不执行
+        model.text_encoder.requires_grad_(True)
+        model.text_encoder.to(torch.float32)
+        logger.info("Unfreezing the text encoder params")
+
+
+    if args.train_image_encoder: # note 执行
+        if args.image_encoder_trainable_layers > 0:
+            for idx in range(args.image_encoder_trainable_layers):
+                model.image_encoder.vision_model.encoder.layers[
+                    -1 - idx
+                ].requires_grad_(True)
+                model.image_encoder.vision_model.encoder.layers[-1 - idx].to(
+                    torch.float32
+                )
+            logger.info("Unfreezing the partial params of image encoder")
+        else: # note 不执行
+            model.image_encoder.requires_grad_(True)
+            model.image_encoder.to(torch.float32)
+            logger.info("Unfreezing all params of image encoder")
+
+    
+    # note Create EMA for the unet.
+    if args.use_ema: # note 不执行
+        ema_unet = UNet2DConditionModel.from_pretrained(
+            args.pretrained_model_name_or_path,
+            subfolder="unet",
+            revision=args.revision,
+        )
+        model.load_ema(ema_unet)
+        if args.load_model is not None:
+            model.ema_param.load_state_dict(
+                torch.load(
+                    Path(args.load_model) / "custom_checkpoint_0.pkl",
+                    map_location="cpu",
+                )
+            )
+    logger.info("Creating EMA for the unet")
+
+    if args.enable_xformers_memory_efficient_attention: # note 不执行
+        if is_xformers_available():
+            model.unet.enable_xformers_memory_efficient_attention()
+        else:
+            raise ValueError(
+                "xformers is not available. Make sure it is installed correctly"
+            )
+        logger.info("Enable xformers memory efficient attention")
+    
+    if args.gradient_checkpointing: # note 不执行
+        if args.train_text_encoder:
+            model.text_encoder.gradient_checkpointing_enable()
+            logger.info("Enable gradient checkpoint for text encoder")
+
+    # * Enable TF32 for faster training on Ampere GPUs,
+    # * cf https://pytorch.org/docs/stable/notes/cuda.html#tensorfloat-32-tf32-on-ampere-devices
+    if args.allow_tf32: # note 执行
+        torch.backends.cuda.matmul.allow_tf32 = True
+        logger.info("set torch.backends.cuda.matmul.allow_tf32 True")
+    
+    if args.scale_lr: # note 不执行
+        args.learning_rate = (
+            args.learning_rate
+            * args.gradient_accumulation_steps
+            * args.train_batch_size
+            * accelerator.num_processes
+        )
+        logger.info("scaling the learning rate")
+
+
+    optimizer_cls = torch.optim.AdamW
+    unet_params = list([p for p in model.unet.parameters() if p.requires_grad])
+    other_params = list(
+        [p for n, p in model.named_parameters() if p.requires_grad and "unet" not in n]
+    )
+    parameters = unet_params + other_params
+    optimizer = optimizer_cls(
+        [
+            {"params": unet_params, "lr": args.learning_rate * args.unet_lr_scale},
+            {"params": other_params, "lr": args.learning_rate},
+        ],
+        betas=(args.adam_beta1, args.adam_beta2),
+        weight_decay=args.adam_weight_decay,
+        eps=args.adam_epsilon,
+    )
+    logger.info("Setup the optimizer")
+    
+    # ! Define Dataset and dataloader
+
+
 
 train()
 
