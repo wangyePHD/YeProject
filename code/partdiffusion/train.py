@@ -40,6 +40,7 @@ from pathlib import Path
 from utils.utils import parse_args
 
 from model import PartDiffusion
+from data import DemoDataset
 
 logger = get_logger(__name__)
 
@@ -86,6 +87,26 @@ def define_logger(args, accelerator):
 def set_random_seed(args):
     set_seed(args.seed)
 
+def define_transforms(flag):
+
+    if flag == 'Train':
+        transform = transforms.Compose([
+            transforms.RandomResizedCrop(224),  # 随机裁剪为固定大小
+            transforms.RandomHorizontalFlip(),  # 随机水平翻转
+            transforms.ColorJitter(brightness=0.4, contrast=0.4, saturation=0.4, hue=0.1),  # 随机颜色变换
+            transforms.ToTensor(),  # 转换为张量
+            transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])  # 归一化
+    ])
+    else:
+        transform = transforms.Compose([
+            transforms.RandomResizedCrop(224),  # 随机裁剪为固定大小
+            transforms.RandomHorizontalFlip(),  # 随机水平翻转
+            transforms.ColorJitter(brightness=0.4, contrast=0.4, saturation=0.4, hue=0.1),  # 随机颜色变换
+            transforms.ToTensor(),  # 转换为张量
+            transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])  # 归一化
+    ])
+    return transform
+    
 
 
 def train():
@@ -223,7 +244,18 @@ def train():
     )
     logger.info("Setup the optimizer")
     
-    # ! Define Dataset and dataloader
+
+    train_transforms = define_transforms(flag="Train")
+    test_transforms = define_transforms(flag="Test")
+    logger.info("Defining the transforms for test and train data")
+
+    device = accelerator.device
+    file = "/home/wangye/YeProject/data/demo_dataset/train_data.json"
+    dataset = DemoDataset(file,tokenizer,device,train_transforms)
+    logger.info("The Dataset length is "+str(dataset.__len__()))
+
+    train_dataloader = torch.utils.data.DataLoader(dataset,args.train_batch_size)
+
 
 
 
