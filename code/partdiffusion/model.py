@@ -77,7 +77,7 @@ class PartDiffusionTextEncoder(CLIPPreTrainedModel):
         # note text token id --> text embedding
         hidden_states = self.embeddings(input_ids)
 
-        bsz, seq_len = input_shape
+        bsz,_,seq_len = input_shape
         causal_attention_mask = self._build_causal_attention_mask(
             bsz, seq_len, hidden_states.dtype
         ).to(hidden_states.device)
@@ -153,7 +153,12 @@ class PartDiffusionImageEncoder(CLIPPreTrainedModel):
 
     # ! TODO
     def forward(self, part_pixel_values):
-        b, num_objects, c, h, w = part_pixel_values.shape
+        if part_pixel_values.shape == 5:
+            b, num_objects, c, h, w = part_pixel_values.shape
+        else:
+            b, c, h, w = part_pixel_values.shape
+            num_objects = 1
+        
         part_pixel_values = part_pixel_values.view(b * num_objects, c, h, w)
         # note 插值处理 补到224
         if h != self.image_size or w != self.image_size:
@@ -194,7 +199,6 @@ class PartDiffusion(nn.Module):
     @staticmethod
     def from_pretrained(args):
         # note load components
-
         text_encoder = PartDiffusionTextEncoder.from_pretrained(
             args.pretrained_model_name_or_path,
             subfolder="text_encoder",
@@ -222,11 +226,10 @@ class PartDiffusion(nn.Module):
 
     def forward(self, batch, noise_scheduler):
         
-        input_ids = batch["input_ids"]
-        pixel_values = batch["pixel_values"]
-        wheel_pixel = batch['wheel_pixel'] # [3, 224, 224]
- 
-        # note vae latents 
+        pixel_values, wheel_pixel, input_ids = batch
+        
+
+        # note vae latents
         vae_dtype = self.vae.parameters().__next__().dtype
         vae_input = pixel_values.to(vae_dtype)
 
@@ -242,7 +245,7 @@ class PartDiffusion(nn.Module):
         )
         
         timesteps = timesteps.long()
-        
+    
         # Add noise to the latents according to the noise magnitude at each timestep
         # note (this is the forward diffusion process)
         noisy_latents = noise_scheduler.add_noise(latents, noise, timesteps)
@@ -251,9 +254,12 @@ class PartDiffusion(nn.Module):
         # note CLIP text encoder for text embedding
         text_embeddings = self.text_encoder(input_ids)[0]
         
-        # ! process fusion
+        # ! fuse the wheel embedding and text embedding
         wheel_embeds = torch.unsqueeze(wheel_embeds,dim=1)
         multimodel_fusion_embeds = torch.concat([text_embeddings,wheel_embeds],dim=1)
+        
+        
+
         # note Get the target for loss depending on the prediction type
         if noise_scheduler.config.prediction_type == "epsilon":
             target = noise
@@ -264,25 +270,28 @@ class PartDiffusion(nn.Module):
                 f"Unknown prediction type {noise_scheduler.config.prediction_type}"
             )
         
+        
+
         pred = self.unet(noisy_latents, timesteps, multimodel_fusion_embeds).sample
+        # pred = self.unet(noisy_latents, timesteps, text_embeddings).sample
 
         # note 只有在满足条件的情况下（通过随机数比较），才会执行这些操作。这样可以在一定概率下引入对象遮罩损失，以提高模型的性能和鲁棒性。cite from chatgpt
-        if self.mask_loss and torch.rand(1) < self.mask_loss_prob:
-            object_segmaps = batch["object_segmaps"]
-            mask = (object_segmaps.sum(dim=1) > 0).float()
-            mask = F.interpolate(
-                mask.unsqueeze(1),
-                size=(pred.shape[-2], pred.shape[-1]),
-                mode="bilinear",
-                align_corners=False,
-            )
-            pred = pred * mask
-            target = target * mask
+        # if self.mask_loss and torch.rand(1) < self.mask_loss_prob:
+        #     object_segmaps = batch["object_segmaps"]
+        #     mask = (object_segmaps.sum(dim=1) > 0).float()
+        #     mask = F.interpolate(
+        #         mask.unsqueeze(1),
+        #         size=(pred.shape[-2], pred.shape[-1]),
+        #         mode="bilinear",
+        #         align_corners=False,
+        #     )
+        #     pred = pred * mask
+        #     target = target * mask
 
         denoise_loss = F.mse_loss(pred.float(), target.float(), reduction="mean")
         
-   
         return_dict = {"denoise_loss": denoise_loss}
+        return return_dict
 
 
 # # note test case

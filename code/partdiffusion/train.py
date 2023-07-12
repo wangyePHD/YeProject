@@ -46,6 +46,15 @@ logger = get_logger(__name__)
 
 
 def define_accelerator(args):
+    """
+    Define an accelerator object based on the given arguments.
+
+    Parameters:
+        args (object): An object containing the arguments for defining the accelerator.
+
+    Returns:
+        Accelerator: The accelerator object defined based on the given arguments.
+    """
 
     accelerator = Accelerator(
         gradient_accumulation_steps=args.gradient_accumulation_steps, # note 1
@@ -65,9 +74,18 @@ def define_accelerator(args):
     return accelerator
 
 
-
 def define_logger(args, accelerator):
+    """
+    Defines a logger for the program.
 
+    Args:
+        args (dict): The arguments for the program.
+        accelerator (Accelerator): The accelerator used for the program.
+
+    Returns:
+        None
+    """
+    
     t = time.localtime()
     str_m_d_y_h_m_s = time.strftime("%m-%d-%Y_%H-%M-%S", t)
     logging.basicConfig(
@@ -133,6 +151,7 @@ def train():
         subfolder="tokenizer",
         revision=args.revision,
     )
+   
     model = PartDiffusion.from_pretrained(args)
     logger.info("Success for loading components and model!")
 
@@ -251,14 +270,227 @@ def train():
 
     device = accelerator.device
     file = "/home/wangye/YeProject/data/demo_dataset/train_data.json"
-    dataset = DemoDataset(file,tokenizer,device,train_transforms)
-    logger.info("The Dataset length is "+str(dataset.__len__()))
+    train_dataset = DemoDataset(file,tokenizer,device,train_transforms)
+    logger.info("The Dataset length is "+str(train_dataset.__len__()))
 
-    train_dataloader = torch.utils.data.DataLoader(dataset,args.train_batch_size)
+    train_dataloader = torch.utils.data.DataLoader(train_dataset,args.train_batch_size)
+
+    # Scheduler and math around the number of training steps.
+    overrode_max_train_steps = False
+    num_update_steps_per_epoch = math.ceil(
+        len(train_dataloader) / args.gradient_accumulation_steps
+    )
+    if args.max_train_steps is None:# note 不执行
+        args.max_train_steps = args.num_train_epochs * num_update_steps_per_epoch
+        overrode_max_train_steps = True
+    # note define scheduler for optimizer
+    lr_scheduler = get_scheduler(
+        args.lr_scheduler,
+        optimizer=optimizer,
+        num_warmup_steps=args.lr_warmup_steps * args.gradient_accumulation_steps,
+        num_training_steps=args.max_train_steps * args.gradient_accumulation_steps,
+    )
+    logger.info("define scheduler for optimizer")
+    
+    # note Prepare everything with our `accelerator`.
+    model, optimizer, train_dataloader, lr_scheduler = accelerator.prepare(
+        model, optimizer, train_dataloader, lr_scheduler
+    )
+    logger.info("Prepare everything with diffuser accelerator")
+
+    if args.use_ema: # note 不执行
+        accelerator.register_for_checkpointing(model.module.ema_param)
+        model.module.ema_param.to(accelerator.device)
+
+    # note We need to recalculate our total training steps as the size of the training dataloader may have changed.
+    num_update_steps_per_epoch = math.ceil(
+        len(train_dataloader) / args.gradient_accumulation_steps
+    )
+    if overrode_max_train_steps: # note 不执行
+        args.max_train_steps = args.num_train_epochs * num_update_steps_per_epoch
+    # note Afterwards we recalculate our number of training epochs
+    args.num_train_epochs = math.ceil(args.max_train_steps / num_update_steps_per_epoch)
+
+    # We need to initialize the trackers we use, and also store our configuration.
+    # The trackers initializes automatically on the main process.
+    if accelerator.is_main_process: # note 执行
+        accelerator.init_trackers("PartDiffusion", config=vars(args))
+
+    
+    # note Train!
+    for name, param in model.named_parameters():
+        if param.requires_grad:
+            logger.info(f"Trainable parameter: {name} with shape {param.shape}")
+
+    total_batch_size = (
+        args.train_batch_size
+        * accelerator.num_processes
+        * args.gradient_accumulation_steps
+    )
+
+    logger.info("***** Running training *****")
+    logger.info(f"  Num examples = {len(train_dataset)}")
+    logger.info(f"  Num Epochs = {args.num_train_epochs}")
+    logger.info(f"  Instantaneous batch size per device = {args.train_batch_size}")
+    logger.info(
+        f"  Total train batch size (w. parallel, distributed & accumulation) = {total_batch_size}"
+    )
+    logger.info(f"  Gradient Accumulation steps = {args.gradient_accumulation_steps}")
+    logger.info(f"  Total optimization steps = {args.max_train_steps}")
+    global_step = 0
+    first_epoch = 0
+    
+    # note Potentially load in the weights and states from a previous save
+    if args.resume_from_checkpoint: # note 执行
+        if args.resume_from_checkpoint != "latest":
+            path = os.path.basename(args.resume_from_checkpoint)
+        else: # note 执行
+            # Get the most recent checkpoint
+            dirs = os.listdir(args.output_dir)
+            dirs = [d for d in dirs if d.startswith("checkpoint")]
+            dirs = sorted(dirs, key=lambda x: int(x.split("-")[1]))
+            path = dirs[-1] if len(dirs) > 0 else None
+        if path is None: # note 执行
+            accelerator.print(
+                f"Checkpoint '{args.resume_from_checkpoint}' does not exist. Starting a new training run."
+            )
+            args.resume_from_checkpoint = None
+        else: # note 不执行
+            accelerator.print(f"Resuming from checkpoint {path}")
+            accelerator.load_state(os.path.join(args.output_dir, path))
+            global_step = int(path.split("-")[1])
+
+            resume_global_step = global_step * args.gradient_accumulation_steps
+            first_epoch = global_step // num_update_steps_per_epoch
+            resume_step = resume_global_step % (
+                num_update_steps_per_epoch * args.gradient_accumulation_steps
+            )
+            # move all the state to the correct device
+            model.to(accelerator.device)
+            if args.use_ema:
+                model.module.ema_param.to(accelerator.device)
+
+
+    # note Only show the progress bar once on each machine.
+    progress_bar = tqdm(
+        range(global_step, args.max_train_steps),
+        disable=not accelerator.is_local_main_process,
+    )
+
+    # note Training
+    logger.info("Starting Training !!!")
+    for epoch in range(first_epoch, args.num_train_epochs):
+        model.train()
+        train_loss = 0.0
+        denoise_loss = 0.0
+        localization_loss = 0.0
+        for step, batch in enumerate(train_dataloader):
+            progress_bar.set_description("Global step: {}".format(global_step))
+
+            with accelerator.accumulate(model), torch.backends.cuda.sdp_kernel(
+                enable_flash = not args.disable_flashattention
+            ):
+                
+                return_dict = model(batch, noise_scheduler)
+                loss = return_dict["denoise_loss"]
+
+                # Gather the losses across all processes for logging (if we use distributed training).
+                avg_loss = accelerator.gather(loss.repeat(args.train_batch_size)).mean()
+                train_loss += avg_loss.item() / args.gradient_accumulation_steps
+
+                avg_denoise_loss = accelerator.gather(return_dict["denoise_loss"].repeat(args.train_batch_size)).mean()
+
+                denoise_loss += (avg_denoise_loss.item() / args.gradient_accumulation_steps)
+
+                if "localization_loss" in return_dict: # note 执行
+                    avg_localization_loss = accelerator.gather(
+                        return_dict["localization_loss"].repeat(args.train_batch_size)
+                    ).mean()
+                    localization_loss += (
+                        avg_localization_loss.item() / args.gradient_accumulation_steps
+                    )
+
+                # Backpropagate
+                accelerator.backward(loss)
+                if accelerator.sync_gradients: # note 执行
+                    accelerator.clip_grad_norm_(parameters, args.max_grad_norm)
+
+                optimizer.step()
+                lr_scheduler.step()
+                optimizer.zero_grad()
+            
+            # Checks if the accelerator has performed an optimization step behind the scenes
+            if accelerator.sync_gradients: # note 执行
+                if args.use_ema: # note 不执行
+                    model.module.ema_param.step(model.module.unet.parameters())
+                progress_bar.update(1)
+                global_step += 1
+                accelerator.log(
+                    {
+                        "train_loss": train_loss,
+                        "denoise_loss": denoise_loss,
+                        "localization_loss": localization_loss,
+                    },
+                    step=global_step,
+                )
+                train_loss = 0.0
+                denoise_loss = 0.0
+                localization_loss = 0.0
+
+                if (
+                    global_step % args.checkpointing_steps == 0
+                    and accelerator.is_local_main_process
+                ):
+                    save_path = os.path.join(
+                        args.output_dir, f"checkpoint-{global_step}"
+                    )
+                    accelerator.save_state(save_path)
+                    logger.info(f"Saved state to {save_path}")
+                    if args.keep_only_last_checkpoint:
+                        # Remove all other checkpoints
+                        for file in os.listdir(args.output_dir):
+                            if file.startswith(
+                                "checkpoint"
+                            ) and file != os.path.basename(save_path):
+                                ckpt_num = int(file.split("-")[1])
+                                if (
+                                    args.keep_interval is None
+                                    or ckpt_num % args.keep_interval != 0
+                                ):
+                                    logger.info(f"Removing {file}")
+                                    shutil.rmtree(os.path.join(args.output_dir, file))
+
+            logs = {
+                "l_noise": return_dict["denoise_loss"].detach().item(),
+                "lr": lr_scheduler.get_last_lr()[0],
+            }
+
+            if "localization_loss" in return_dict:
+                logs["l_loc"] = return_dict["localization_loss"].detach().item()
+
+            progress_bar.set_postfix(**logs)
+
+            if global_step >= args.max_train_steps:
+                break
+
+    # Create the pipeline using the trained modules and save it.
+    accelerator.wait_for_everyone()
+    if accelerator.is_main_process:
+        model = accelerator.unwrap_model(model)
+        if args.use_ema:
+            model.ema_param.copy_to(model.unet.parameters())
+
+        pipeline = model.to_pipeline()
+        pipeline.save_pretrained(args.output_dir)
+
+    accelerator.end_training()
 
 
 
+if __name__ == "__main__":
 
-train()
+    train()
+    
+
 
 

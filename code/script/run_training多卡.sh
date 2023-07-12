@@ -1,6 +1,6 @@
 export WANDB_NAME=PartDiffusion
 export WANDB_DISABLE_SERVICE=true
-
+export CUDA_VISIBLE_DEVICES="0,1"
 
 DATASET_PATH="/home/wangye/YeProject/data/stanford-car/after_seg/train"
 
@@ -9,12 +9,13 @@ FAMILY=runwayml
 MODEL=stable-diffusion-v1-5
 IMAGE_ENCODER=openai/clip-vit-large-patch14
 
-CUDA_VISIBLE_DEVICES=0 accelerate launch \
+accelerate launch \
     --mixed_precision=bf16 \
     --machine_rank 0 \
     --num_machines 1 \
-    --main_process_port 11135 \
-    --num_processes 1 \
+    --main_process_port 1113 \
+    --num_processes 2 \
+    --multi_gpu \
     partdiffusion/train.py \
     --pretrained_model_name_or_path ${FAMILY}/${MODEL} \
     --dataset_name ${DATASET_PATH} \
@@ -22,7 +23,7 @@ CUDA_VISIBLE_DEVICES=0 accelerate launch \
     --output_dir models/${MODEL}/${DATASET_NAME}/${WANDB_NAME} \
     --max_train_steps 150000 \
     --num_train_epochs 150000 \
-    --train_batch_size 2 \
+    --train_batch_size 1 \
     --learning_rate 1e-5 \
     --unet_lr_scale 1.0 \
     --checkpointing_steps 200 \

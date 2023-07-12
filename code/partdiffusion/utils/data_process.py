@@ -3,7 +3,7 @@ import json
 from tqdm import tqdm
 
 part_num = 1
-path = "/home/wangye/YeProject/data/demo_dataset/test"
+path = "/home/wangye/YeProject/data/demo_dataset/train"
 folder_list = os.listdir(path)
 data_all = []
 for folder in tqdm(folder_list):
@@ -34,7 +34,7 @@ for folder in tqdm(folder_list):
     data_all.append(dict_data)
 
 # note data_all 写入json文件 
-output_path = "/home/wangye/YeProject/data/demo_dataset/test_data.json"
+output_path = "/home/wangye/YeProject/data/demo_dataset/train_data.json"
 
 # 打开文件并将 data_all 写入其中
 with open(output_path, 'w') as json_file:
