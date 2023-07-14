@@ -77,7 +77,7 @@ class PartDiffusionTextEncoder(CLIPPreTrainedModel):
         # note text token id --> text embedding
         hidden_states = self.embeddings(input_ids)
 
-        bsz,_,seq_len = input_shape
+        bsz,seq_len = input_shape
         causal_attention_mask = self._build_causal_attention_mask(
             bsz, seq_len, hidden_states.dtype
         ).to(hidden_states.device)
@@ -223,6 +223,19 @@ class PartDiffusion(nn.Module):
 
         return PartDiffusion(text_encoder,image_encoder,vae,unet,args)
     
+    def to_pipeline(self):
+        pipe = StableDiffusionPipeline.from_pretrained(
+            self.pretrained_model_name_or_path,
+            revision=self.revision,
+            non_ema_revision=self.non_ema_revision,
+            text_encoder=self.text_encoder,
+            vae=self.vae,
+            unet=self.unet,
+        )
+        pipe.safety_checker = None
+        pipe.image_encoder = self.image_encoder
+
+        return pipe
 
     def forward(self, batch, noise_scheduler):
         
@@ -258,8 +271,6 @@ class PartDiffusion(nn.Module):
         wheel_embeds = torch.unsqueeze(wheel_embeds,dim=1)
         multimodel_fusion_embeds = torch.concat([text_embeddings,wheel_embeds],dim=1)
         
-        
-
         # note Get the target for loss depending on the prediction type
         if noise_scheduler.config.prediction_type == "epsilon":
             target = noise

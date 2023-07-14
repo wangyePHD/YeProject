@@ -746,3 +746,37 @@ Mixed precision type: bf16
 07/12/2023 05:10:35 - INFO - __main__ -   Gradient Accumulation steps = 1
 07/12/2023 05:10:35 - INFO - __main__ -   Total optimization steps = 1000
 07/12/2023 05:10:35 - INFO - __main__ - Starting Training !!!
+07/12/2023 05:11:59 - INFO - accelerate.accelerator - Saving current state to /home/wangye/YeProject/ckpts/models/stable-diffusion-v1-5/Stanford-Car/PartDiffusion/checkpoint-200
+07/12/2023 05:12:05 - INFO - accelerate.checkpointing - Model weights saved in /home/wangye/YeProject/ckpts/models/stable-diffusion-v1-5/Stanford-Car/PartDiffusion/checkpoint-200/pytorch_model.bin
+07/12/2023 05:12:15 - INFO - accelerate.checkpointing - Optimizer state saved in /home/wangye/YeProject/ckpts/models/stable-diffusion-v1-5/Stanford-Car/PartDiffusion/checkpoint-200/optimizer.bin
+07/12/2023 05:12:15 - INFO - accelerate.checkpointing - Scheduler state saved in /home/wangye/YeProject/ckpts/models/stable-diffusion-v1-5/Stanford-Car/PartDiffusion/checkpoint-200/scheduler.bin
+07/12/2023 05:12:15 - INFO - accelerate.checkpointing - Random states saved in /home/wangye/YeProject/ckpts/models/stable-diffusion-v1-5/Stanford-Car/PartDiffusion/checkpoint-200/random_states_0.pkl
+07/12/2023 05:12:15 - INFO - __main__ - Saved state to /home/wangye/YeProject/ckpts/models/stable-diffusion-v1-5/Stanford-Car/PartDiffusion/checkpoint-200
+07/12/2023 05:13:37 - INFO - accelerate.accelerator - Saving current state to /home/wangye/YeProject/ckpts/models/stable-diffusion-v1-5/Stanford-Car/PartDiffusion/checkpoint-400
+07/12/2023 05:13:44 - INFO - accelerate.checkpointing - Model weights saved in /home/wangye/YeProject/ckpts/models/stable-diffusion-v1-5/Stanford-Car/PartDiffusion/checkpoint-400/pytorch_model.bin
+07/12/2023 05:13:56 - INFO - accelerate.checkpointing - Optimizer state saved in /home/wangye/YeProject/ckpts/models/stable-diffusion-v1-5/Stanford-Car/PartDiffusion/checkpoint-400/optimizer.bin
+07/12/2023 05:13:56 - INFO - accelerate.checkpointing - Scheduler state saved in /home/wangye/YeProject/ckpts/models/stable-diffusion-v1-5/Stanford-Car/PartDiffusion/checkpoint-400/scheduler.bin
+07/12/2023 05:13:56 - INFO - accelerate.checkpointing - Random states saved in /home/wangye/YeProject/ckpts/models/stable-diffusion-v1-5/Stanford-Car/PartDiffusion/checkpoint-400/random_states_0.pkl
+07/12/2023 05:13:56 - INFO - __main__ - Saved state to /home/wangye/YeProject/ckpts/models/stable-diffusion-v1-5/Stanford-Car/PartDiffusion/checkpoint-400
+07/12/2023 05:13:56 - INFO - __main__ - Removing checkpoint-200
+07/12/2023 05:15:20 - INFO - accelerate.accelerator - Saving current state to /home/wangye/YeProject/ckpts/models/stable-diffusion-v1-5/Stanford-Car/PartDiffusion/checkpoint-600
+07/12/2023 05:15:27 - INFO - accelerate.checkpointing - Model weights saved in /home/wangye/YeProject/ckpts/models/stable-diffusion-v1-5/Stanford-Car/PartDiffusion/checkpoint-600/pytorch_model.bin
+07/12/2023 05:15:36 - INFO - accelerate.checkpointing - Optimizer state saved in /home/wangye/YeProject/ckpts/models/stable-diffusion-v1-5/Stanford-Car/PartDiffusion/checkpoint-600/optimizer.bin
+07/12/2023 05:15:36 - INFO - accelerate.checkpointing - Scheduler state saved in /home/wangye/YeProject/ckpts/models/stable-diffusion-v1-5/Stanford-Car/PartDiffusion/checkpoint-600/scheduler.bin
+07/12/2023 05:15:36 - INFO - accelerate.checkpointing - Random states saved in /home/wangye/YeProject/ckpts/models/stable-diffusion-v1-5/Stanford-Car/PartDiffusion/checkpoint-600/random_states_0.pkl
+07/12/2023 05:15:36 - INFO - __main__ - Saved state to /home/wangye/YeProject/ckpts/models/stable-diffusion-v1-5/Stanford-Car/PartDiffusion/checkpoint-600
+07/12/2023 05:15:36 - INFO - __main__ - Removing checkpoint-400
+07/12/2023 05:17:00 - INFO - accelerate.accelerator - Saving current state to /home/wangye/YeProject/ckpts/models/stable-diffusion-v1-5/Stanford-Car/PartDiffusion/checkpoint-800
+07/12/2023 05:17:07 - INFO - accelerate.checkpointing - Model weights saved in /home/wangye/YeProject/ckpts/models/stable-diffusion-v1-5/Stanford-Car/PartDiffusion/checkpoint-800/pytorch_model.bin
+07/12/2023 05:17:19 - INFO - accelerate.checkpointing - Optimizer state saved in /home/wangye/YeProject/ckpts/models/stable-diffusion-v1-5/Stanford-Car/PartDiffusion/checkpoint-800/optimizer.bin
+07/12/2023 05:17:19 - INFO - accelerate.checkpointing - Scheduler state saved in /home/wangye/YeProject/ckpts/models/stable-diffusion-v1-5/Stanford-Car/PartDiffusion/checkpoint-800/scheduler.bin
+07/12/2023 05:17:19 - INFO - accelerate.checkpointing - Random states saved in /home/wangye/YeProject/ckpts/models/stable-diffusion-v1-5/Stanford-Car/PartDiffusion/checkpoint-800/random_states_0.pkl
+07/12/2023 05:17:19 - INFO - __main__ - Saved state to /home/wangye/YeProject/ckpts/models/stable-diffusion-v1-5/Stanford-Car/PartDiffusion/checkpoint-800
+07/12/2023 05:17:19 - INFO - __main__ - Removing checkpoint-600
+07/12/2023 05:18:40 - INFO - accelerate.accelerator - Saving current state to /home/wangye/YeProject/ckpts/models/stable-diffusion-v1-5/Stanford-Car/PartDiffusion/checkpoint-1000
+07/12/2023 05:18:46 - INFO - accelerate.checkpointing - Model weights saved in /home/wangye/YeProject/ckpts/models/stable-diffusion-v1-5/Stanford-Car/PartDiffusion/checkpoint-1000/pytorch_model.bin
+07/12/2023 05:18:55 - INFO - accelerate.checkpointing - Optimizer state saved in /home/wangye/YeProject/ckpts/models/stable-diffusion-v1-5/Stanford-Car/PartDiffusion/checkpoint-1000/optimizer.bin
+07/12/2023 05:18:55 - INFO - accelerate.checkpointing - Scheduler state saved in /home/wangye/YeProject/ckpts/models/stable-diffusion-v1-5/Stanford-Car/PartDiffusion/checkpoint-1000/scheduler.bin
+07/12/2023 05:18:55 - INFO - accelerate.checkpointing - Random states saved in /home/wangye/YeProject/ckpts/models/stable-diffusion-v1-5/Stanford-Car/PartDiffusion/checkpoint-1000/random_states_0.pkl
+07/12/2023 05:18:55 - INFO - __main__ - Saved state to /home/wangye/YeProject/ckpts/models/stable-diffusion-v1-5/Stanford-Car/PartDiffusion/checkpoint-1000
+07/12/2023 05:18:55 - INFO - __main__ - Removing checkpoint-800

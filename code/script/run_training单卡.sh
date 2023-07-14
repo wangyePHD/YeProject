@@ -20,8 +20,8 @@ CUDA_VISIBLE_DEVICES=0 accelerate launch \
     --dataset_name ${DATASET_PATH} \
     --logging_dir logs/${MODEL}/${DATASET_NAME}/${WANDB_NAME} \
     --output_dir /home/wangye/YeProject/ckpts/models/${MODEL}/${DATASET_NAME}/${WANDB_NAME} \
-    --max_train_steps 1000 \
-    --num_train_epochs 1000 \
+    --max_train_steps 10000 \
+    --num_train_epochs 10000 \
     --train_batch_size 2 \
     --learning_rate 1e-5 \
     --unet_lr_scale 1.0 \

@@ -46,6 +46,7 @@ class DemoDataset(Dataset):
 
         json_item = self.data[idx]
         raw_image = json_item['raw_image']
+ 
         # ! load part image, note that we just use a part image
         part_image_list = json_item['part_image_list']
         mask_json = json_item['mask_json']
@@ -62,6 +63,7 @@ class DemoDataset(Dataset):
 
         input_ids = self._tokenize_caption(caption)
         input_ids = torch.tensor(input_ids, dtype=torch.long)
+        input_ids = torch.squeeze(input_ids,dim=0)
         raw_image = raw_image.to(self.device)
         part_image = part_image.to(self.device)
         input_ids = input_ids.to(self.device)

@@ -151,6 +151,7 @@ def train():
         subfolder="tokenizer",
         revision=args.revision,
     )
+
    
     model = PartDiffusion.from_pretrained(args)
     logger.info("Success for loading components and model!")
@@ -482,8 +483,9 @@ def train():
 
         pipeline = model.to_pipeline()
         pipeline.save_pretrained(args.output_dir)
-
+        logger.info("Saving pipeline to " + args.output_dir)
     accelerator.end_training()
+    logger.info("Training finished!")
 
 
 
