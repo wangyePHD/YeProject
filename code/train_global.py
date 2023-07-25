@@ -25,7 +25,6 @@ from transformers.utils import (
 )
 from transformers.models.clip.configuration_clip import CLIPTextConfig
 from transformers.models.clip.modeling_clip import CLIP_TEXT_INPUTS_DOCSTRING, _expand_mask
-from transformers import AutoImageProcessor, Dinov2Model
 from PIL import Image
 from tqdm.auto import tqdm
 from transformers import CLIPTextModel, CLIPTokenizer, CLIPVisionModel
@@ -113,8 +112,6 @@ def inj_forward_text(
     input_shape = r_input_ids.size()
     r_input_ids = r_input_ids.view(-1, input_shape[-1])
 
-    import ipdb
-    ipdb.set_trace()
     
     inputs_embeds = self.embeddings.token_embedding(r_input_ids)
     new_inputs_embeds = inputs_embeds.clone()
