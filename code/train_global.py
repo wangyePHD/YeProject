@@ -25,7 +25,7 @@ from transformers.utils import (
 )
 from transformers.models.clip.configuration_clip import CLIPTextConfig
 from transformers.models.clip.modeling_clip import CLIP_TEXT_INPUTS_DOCSTRING, _expand_mask
-
+from transformers import AutoImageProcessor, Dinov2Model
 from PIL import Image
 from tqdm.auto import tqdm
 from transformers import CLIPTextModel, CLIPTokenizer, CLIPVisionModel
@@ -62,6 +62,7 @@ class Mapper(nn.Module):
     def forward(self, embs):
         hidden_states = ()
         for i, emb in enumerate(embs):
+           
             hidden_state = getattr(self, f'mapping_{i}')(emb[:, :1]) + getattr(self, f'mapping_patch_{i}')(emb[:, 1:]).mean(dim=1, keepdim=True)
             hidden_states += (hidden_state, )
         hidden_states = torch.cat(hidden_states, dim=1)
@@ -100,7 +101,7 @@ def inj_forward_text(
 
     if input_ids is None:
         raise ValueError("You have to specify either input_ids")
-    
+
     r_input_ids = input_ids['input_ids']
     if 'inj_embedding' in input_ids:
         inj_embedding = input_ids['inj_embedding']
@@ -112,7 +113,9 @@ def inj_forward_text(
     input_shape = r_input_ids.size()
     r_input_ids = r_input_ids.view(-1, input_shape[-1])
 
-
+    import ipdb
+    ipdb.set_trace()
+    
     inputs_embeds = self.embeddings.token_embedding(r_input_ids)
     new_inputs_embeds = inputs_embeds.clone()
     if inj_embedding is not None:
@@ -420,6 +423,7 @@ def validation(example, tokenizer, image_encoder, text_encoder, unet, mapper, va
         token_index = int(token_index)
         inj_embedding = inj_embedding[:, token_index:token_index + 1, :]
 
+    
     encoder_hidden_states = text_encoder({'input_ids': example["input_ids"],
                                           "inj_embedding": inj_embedding,
                                           "inj_index": placeholder_idx})[0]
@@ -467,7 +471,8 @@ def main():
         gradient_accumulation_steps=args.gradient_accumulation_steps,
         mixed_precision=args.mixed_precision,
         log_with="tensorboard",
-        logging_dir=logging_dir,
+        project_dir=logging_dir,
+        
     )
  
     
@@ -570,8 +575,7 @@ def main():
         data_root=args.train_data_dir,
         tokenizer=tokenizer,
         size=args.resolution,
-        placeholder_token=args.placeholder_token,
-        set="test",
+        placeholder_token=args.placeholder_token
     )
     train_dataloader = torch.utils.data.DataLoader(train_dataset, batch_size=args.train_batch_size, shuffle=True)
 
@@ -653,11 +657,16 @@ def main():
                 placeholder_idx = batch["index"]
                 image = F.interpolate(batch["pixel_values_clip"], (224, 224), mode='bilinear')
 
+                
+                
                 image_features = image_encoder(image, output_hidden_states=True)
+                
                 image_embeddings = [image_features[0], image_features[2][4], image_features[2][8], image_features[2][12], image_features[2][16]]
                 image_embeddings = [emb.detach() for emb in image_embeddings]
                 inj_embedding = mapper(image_embeddings)
-
+                
+               
+                
                 # Get the text embedding for conditioning
                 encoder_hidden_states = text_encoder({'input_ids': batch["input_ids"],
                                                       "inj_embedding": inj_embedding,

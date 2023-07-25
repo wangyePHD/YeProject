@@ -140,7 +140,7 @@ class CustomDatasetWithBG(Dataset):
 
         image = Image.open(self.image_paths[i % self.num_images])
 
-        mask_path = self.image_paths[i % self.num_images].replace('.jpeg', '.png').replace('.jpg', '.png').replace('.JPEG', '.png')[:-4] + '_bg.png'
+        mask_path = self.image_paths[i % self.num_images].replace('.jpeg', '.png').replace('.jpg', '.png').replace('.JPEG', '.png')[:-4] + '_bg_bg.png'
         mask = np.array(Image.open(mask_path))
         
         mask = np.where(mask > 0, 1, 0)
@@ -173,14 +173,12 @@ class OpenImagesDataset(Dataset):
         tokenizer,
         size=512,
         interpolation="bicubic",
-        set="train",
         placeholder_token="*",
     ):
         self.data_root = data_root
         self.tokenizer = tokenizer
         self.size = size
         self.placeholder_token = placeholder_token
-        self.set_type = set
 
         self.random_trans = A.Compose([
             A.Resize(height=224, width=224),
@@ -189,33 +187,19 @@ class OpenImagesDataset(Dataset):
             A.Blur(p=0.3),
             A.ElasticTransform(p=0.3)
         ])
+        
+        self.box_list = []
+        bbox_path = os.path.join(data_root, 'mask_box.txt')
+        # note read the bbox_path txt file using f
+        with open(bbox_path, 'r') as f:
+            for line in f:
+                img_id = line.strip().split('$')[0]
+                bbox = line.strip().split('$')[1].split(',')
+                bbox = [float(b) for b in bbox]
+                bbox.append(img_id)
+                self.box_list.append(bbox)
 
-        self.bbox_path_list = []
-        if set == "train":
-            bboxs_path = os.path.join(data_root, 'annotations', f'oidv6-train-annotations-bbox.csv')
-        elif set == "validation":
-            bboxs_path = os.path.join(data_root, 'annotations', f'validation-annotations-bbox.csv')
-        else:
-            bboxs_path = os.path.join(data_root, 'annotations', f'test-annotations-bbox.csv')
-
-        df_val_bbox = pd.read_csv(bboxs_path)
-        bbox_groups = df_val_bbox.groupby(df_val_bbox.LabelName)
-
-        bbox_full = []
-        for label_name in df_val_bbox['LabelName'].unique():
-            bboxs = bbox_groups.get_group(label_name)[
-                ['XMin', 'XMax', 'YMin', 'YMax', 'LabelName', 'ImageID',
-                 'IsOccluded', 'IsTruncated', 'IsGroupOf', 'IsInside']].values.tolist()
-            bboxs_new = []
-            for bbox in bboxs:
-                if not ((bbox[1] - bbox[0]) * (bbox[3] - bbox[2]) > 0.8 or (bbox[1] - bbox[0]) * (
-                        bbox[3] - bbox[2]) < 0.02):
-                    bboxs_new.append([bbox[0], bbox[1], bbox[2], bbox[3], bbox[4], bbox[5]])
-            bbox_full.extend(bboxs_new)
-
-        self.bboxs_full = bbox_full
-
-        self.num_images = len(bbox_full)
+        self.num_images = len(self.box_list)
 
         print('{}: total {} images ...'.format(set, self.num_images))
 
@@ -278,34 +262,27 @@ class OpenImagesDataset(Dataset):
         return input_ids, index, text
 
     def __getitem__(self, i):
+        
         example = {}
-
         input_ids, index, text = self.obtain_text('a')
         example["input_ids"] = input_ids
         example["index"] = index
         example["text"] = text
 
-        bbox_sample = self.bboxs_full[i % self.num_images]
+        bbox_sample = self.box_list[i % self.num_images]
         bbox_sample = copy.copy(bbox_sample)
 
         file_name = bbox_sample[-1] + '.jpg'
-        img_path = os.path.join(self.data_root, 'images', self.set_type, file_name)
+        img_path = os.path.join(self.data_root, 'data', file_name)
 
         try:
             img_p = Image.open(img_path).convert("RGB")
             img_p_np = np.array(img_p)
-            bbox_sample[0] *= int(img_p_np.shape[1])
-            bbox_sample[1] *= int(img_p_np.shape[1])
-            bbox_sample[2] *= int(img_p_np.shape[0])
-            bbox_sample[3] *= int(img_p_np.shape[0])
-
-            bbox_pad = copy.copy(bbox_sample)
-            bbox_pad[0] = int(bbox_sample[0] - min(10, bbox_sample[0] - 0))
-            bbox_pad[1] = int(bbox_sample[1] + min(10, img_p.size[0] - bbox_sample[1]))
-            bbox_pad[2] = int(bbox_sample[2] - min(10, bbox_sample[2] - 0))
-            bbox_pad[3] = int(bbox_sample[3] + min(10, img_p.size[1] - bbox_sample[3]))
-
-            image_tensor = img_p_np[bbox_pad[2]:bbox_pad[3], bbox_pad[0]:bbox_pad[1], :]
+            lx, l_y, r_x, r_y = bbox_sample
+            l_x, l_y, r_x, r_y = int(l_x), int(l_y), int(r_x), int(r_y)
+            
+            # note cut out the subject according to the bbox 
+            image_tensor = img_p_np[l_y:r_y,l_x:r_x,:]
             example["pixel_values"] = self.process(image_tensor)
             
             ref_image_tensor = self.random_trans(image=image_tensor)
