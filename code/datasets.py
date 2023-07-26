@@ -189,7 +189,7 @@ class OpenImagesDataset(Dataset):
         ])
         
         self.box_list = []
-        bbox_path = os.path.join(data_root, 'mask_box.txt')
+        bbox_path = os.path.join(data_root, 'mask_box_small.txt')
         # note read the bbox_path txt file using f
         with open(bbox_path, 'r') as f:
             for line in f:

@@ -61,7 +61,7 @@ class Mapper(nn.Module):
         out = self.lrelu2(out)
         out = self.layer3(out)
         
-        out = torch.mean(out,dim=1)
+        out = torch.mean(out,dim=1).unsqueeze(dim=1)
         return out
 
 
@@ -108,7 +108,6 @@ def inj_forward_text(
 
     input_shape = r_input_ids.size()
     r_input_ids = r_input_ids.view(-1, input_shape[-1])
-
 
     inputs_embeds = self.embeddings.token_embedding(r_input_ids)
     new_inputs_embeds = inputs_embeds.clone()
@@ -200,7 +199,8 @@ def inj_forward_crossattention(self, hidden_states, encoder_hidden_states=None, 
     return hidden_states
 
 
-
+import logging
+logging.basicConfig(level=logging.INFO)
 logger = get_logger(__name__)
 
 
@@ -407,13 +407,13 @@ def validation(example, tokenizer, image_encoder, text_encoder, unet, mapper, va
     placeholder_idx = example["index"]
     image = F.interpolate(example["pixel_values_clip"], (224, 224), mode='bilinear')
 
-    image_features = image_encoder(image, output_hidden_states=True)
-    image_embeddings = [image_features[0], image_features[2][4], image_features[2][8], image_features[2][12],
-                        image_features[2][16]]
-    image_embeddings = [emb.detach() for emb in image_embeddings]
-    inj_embedding = mapper(image_embeddings)
+   
+    
+    image_features = image_encoder(image, output_hidden_states=True).last_hidden_state
+    inj_embedding = mapper(image_features)
 
     if token_index != 'full':
+        
         token_index = int(token_index)
         inj_embedding = inj_embedding[:, token_index:token_index + 1, :]
 
@@ -424,6 +424,7 @@ def validation(example, tokenizer, image_encoder, text_encoder, unet, mapper, va
 
     for t in tqdm(scheduler.timesteps):
         latent_model_input = scheduler.scale_model_input(latents, t)
+        
         noise_pred_text = unet(
             latent_model_input,
             t,
@@ -619,14 +620,14 @@ def main():
 
     # Train!
     total_batch_size = args.train_batch_size * accelerator.num_processes * args.gradient_accumulation_steps
-
-    logger.info("***** Running training *****")
-    logger.info(f"  Num examples = {len(train_dataset)}")
-    logger.info(f"  Num Epochs = {args.num_train_epochs}")
-    logger.info(f"  Instantaneous batch size per device = {args.train_batch_size}")
-    logger.info(f"  Total train batch size (w. parallel, distributed & accumulation) = {total_batch_size}")
-    logger.info(f"  Gradient Accumulation steps = {args.gradient_accumulation_steps}")
-    logger.info(f"  Total optimization steps = {args.max_train_steps}")
+  
+    logger.info("***** Running training *****",main_process_only=True)
+    logger.info(f"  Num examples = {len(train_dataset)}",main_process_only=True)
+    logger.info(f"  Num Epochs = {args.num_train_epochs}",main_process_only=True)
+    logger.info(f"  Instantaneous batch size per device = {args.train_batch_size}",main_process_only=True)
+    logger.info(f"  Total train batch size (w. parallel, distributed & accumulation) = {total_batch_size}",main_process_only=True)
+    logger.info(f"  Gradient Accumulation steps = {args.gradient_accumulation_steps}",main_process_only=True)
+    logger.info(f"  Total optimization steps = {args.max_train_steps}",main_process_only=True)
     # Only show the progress bar once on each machine.
     progress_bar = tqdm(range(args.max_train_steps), disable=not accelerator.is_local_main_process)
     progress_bar.set_description("Steps")
@@ -658,7 +659,7 @@ def main():
                 # image_embeddings = [image_features[0], image_features[2][4], image_features[2][8], image_features[2][12], image_features[2][16]]
                 # image_embeddings = [emb.detach() for emb in image_embeddings]
                 inj_embedding = mapper(image_features)
-                
+            
                 # Get the text embedding for conditioning
                 encoder_hidden_states = text_encoder({'input_ids': batch["input_ids"],
                                                       "inj_embedding": inj_embedding,
