@@ -275,25 +275,22 @@ class OpenImagesDataset(Dataset):
         file_name = bbox_sample[-1] + '.jpg'
         img_path = os.path.join(self.data_root, 'data', file_name)
 
-        try:
-            img_p = Image.open(img_path).convert("RGB")
-            img_p_np = np.array(img_p)
-            lx, l_y, r_x, r_y = bbox_sample
-            l_x, l_y, r_x, r_y = int(l_x), int(l_y), int(r_x), int(r_y)
-            
-            # note cut out the subject according to the bbox 
-            image_tensor = img_p_np[l_y:r_y,l_x:r_x,:]
-            example["pixel_values"] = self.process(image_tensor)
-            
-            ref_image_tensor = self.random_trans(image=image_tensor)
-            ref_image_tensor = Image.fromarray(ref_image_tensor["image"])
-            example["pixel_values_clip"] = self.get_tensor_clip()(ref_image_tensor)
+        # try:
+        img_p = Image.open(img_path).convert("RGB")
+        img_p_np = np.array(img_p)
+        
+        l_x, l_y, r_x, r_y,_ = bbox_sample
+        
+        l_x, l_y, r_x, r_y = int(l_x), int(l_y), int(r_x), int(r_y)
+        
+        # note cut out the subject according to the bbox 
+        image_tensor = img_p_np[l_y:r_y,l_x:r_x,:]
+        
+        example["pixel_values"] = self.process(image_tensor)
+        ref_image_tensor = self.random_trans(image=image_tensor)
+        ref_image_tensor = Image.fromarray(ref_image_tensor["image"])
+        example["pixel_values_clip"] = self.get_tensor_clip()(ref_image_tensor)
 
-        except Exception as e:
-            example["pixel_values"] = torch.zeros((3, 512, 512))
-            example["pixel_values_clip"] = torch.zeros((3, 224, 224))
-            with open('error.txt', 'a+') as f:
-                f.write(str(e) + '\n')
 
         return example
 
