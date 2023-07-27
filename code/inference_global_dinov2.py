@@ -178,6 +178,27 @@ def parse_args():
         default=None,
         help="A seed for testing.",
     )
+    
+    parser.add_argument(
+        "--resolution_H",
+        type=int,
+        default=384,
+        help=(
+            "The resolution for input images, all the images in the train/validation dataset will be resized to this"
+            " resolution"
+        ),
+    )
+    
+    parser.add_argument(
+        "--resolution_W",
+        type=int,
+        default=896,
+        help=(
+            "The resolution for input images, all the images in the train/validation dataset will be resized to this"
+            " resolution"
+        ),
+    )
+    
     args = parser.parse_args()
     return args
 
@@ -198,7 +219,8 @@ if __name__ == "__main__":
     train_dataset = CustomDatasetWithBG(
         data_root=args.test_data_dir,
         tokenizer=tokenizer,
-        size=512,
+        width=args.resolution_W,
+        height=args.resolution_H,
         placeholder_token=args.placeholder_token,
         template=args.template,
     )
@@ -216,5 +238,7 @@ if __name__ == "__main__":
         print(step, batch['text'])
         syn_images = validation(batch, tokenizer, image_encoder, text_encoder, unet, mapper, vae, batch["pixel_values_clip"].device, 5,
                                 token_index=args.token_index, seed=args.seed)
+        
+        Image.fromarray(np.array(syn_images[0])).save(os.path.join(save_dir, f'{str(step).zfill(5)}_{str(args.seed).zfill(5)}.jpg'))
         concat = np.concatenate((np.array(syn_images[0]), th2image(batch["pixel_values"][0])), axis=1)
         Image.fromarray(concat).save(os.path.join(save_dir, f'{str(step).zfill(5)}_{str(args.seed).zfill(5)}.jpg'))

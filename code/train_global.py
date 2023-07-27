@@ -112,8 +112,6 @@ def inj_forward_text(
     input_shape = r_input_ids.size()
     r_input_ids = r_input_ids.view(-1, input_shape[-1])
 
-    import ipdb
-    ipdb.set_trace()
     
     inputs_embeds = self.embeddings.token_embedding(r_input_ids)
     new_inputs_embeds = inputs_embeds.clone()
@@ -663,9 +661,6 @@ def main():
                 image_embeddings = [image_features[0], image_features[2][4], image_features[2][8], image_features[2][12], image_features[2][16]]
                 image_embeddings = [emb.detach() for emb in image_embeddings]
                 inj_embedding = mapper(image_embeddings)
-                import ipdb
-                ipdb.set_trace()
-               
                 
                 # Get the text embedding for conditioning
                 encoder_hidden_states = text_encoder({'input_ids': batch["input_ids"],

@@ -257,9 +257,18 @@ def parse_args():
     )
     parser.add_argument("--seed", type=int, default=None, help="A seed for reproducible training.")
     parser.add_argument(
-        "--resolution",
+        "--resolution_H",
         type=int,
-        default=512,
+        default=384,
+        help=(
+            "The resolution for input images, all the images in the train/validation dataset will be resized to this"
+            " resolution"
+        ),
+    )
+    parser.add_argument(
+        "--resolution_W",
+        type=int,
+        default=896,
         help=(
             "The resolution for input images, all the images in the train/validation dataset will be resized to this"
             " resolution"
@@ -392,12 +401,12 @@ def validation(example, tokenizer, image_encoder, text_encoder, unet, mapper, va
 
     if seed is None:
         latents = torch.randn(
-            (example["pixel_values"].shape[0], unet.in_channels, 64, 64)
+            (example["pixel_values"].shape[0], unet.in_channels, 48, 112)
         )
     else:
         generator = torch.manual_seed(seed)
         latents = torch.randn(
-            (example["pixel_values"].shape[0], unet.in_channels, 64, 64), generator=generator,
+            (example["pixel_values"].shape[0], unet.in_channels, 48, 112), generator=generator,
         )
 
     latents = latents.to(example["pixel_values_clip"])
@@ -452,6 +461,7 @@ def validation(example, tokenizer, image_encoder, text_encoder, unet, mapper, va
 
     _latents = 1 / 0.18215 * latents.clone()
     images = vae.decode(_latents).sample
+
     ret_pil_images = [th2image(image) for image in images]
 
     return ret_pil_images
@@ -573,7 +583,8 @@ def main():
     train_dataset = OpenImagesDataset(
         data_root=args.train_data_dir,
         tokenizer=tokenizer,
-        size=args.resolution,
+        width=args.resolution_W,
+        height=args.resolution_H,
         placeholder_token=args.placeholder_token
     )
     train_dataloader = torch.utils.data.DataLoader(train_dataset, batch_size=args.train_batch_size, shuffle=True)
@@ -659,7 +670,7 @@ def main():
                 # image_embeddings = [image_features[0], image_features[2][4], image_features[2][8], image_features[2][12], image_features[2][16]]
                 # image_embeddings = [emb.detach() for emb in image_embeddings]
                 inj_embedding = mapper(image_features)
-            
+                
                 # Get the text embedding for conditioning
                 encoder_hidden_states = text_encoder({'input_ids': batch["input_ids"],
                                                       "inj_embedding": inj_embedding,
@@ -705,7 +716,7 @@ def main():
 
             if global_step >= args.max_train_steps:
                 break
-
+        
         accelerator.wait_for_everyone()
 
     if accelerator.is_main_process:

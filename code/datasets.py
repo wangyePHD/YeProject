@@ -70,14 +70,16 @@ class CustomDatasetWithBG(Dataset):
         self,
         data_root,
         tokenizer,
-        size=512,
+        width=896,
+        height=384,
         interpolation="bicubic",
         placeholder_token="*",
         template="a photo of a {}",
     ):
         self.data_root = data_root
         self.tokenizer = tokenizer
-        self.size = size
+        self.width = width
+        self.height = height
         self.placeholder_token = placeholder_token
 
         self.image_paths = []
@@ -110,7 +112,7 @@ class CustomDatasetWithBG(Dataset):
         return torchvision.transforms.Compose(transform_list)
 
     def process(self, image):
-        img = cv2.resize(image, (self.size, self.size), interpolation=cv2.INTER_CUBIC)
+        img = cv2.resize(image, (self.width, self.height), interpolation=cv2.INTER_CUBIC)
         img = np.array(img).astype(np.float32)
         img = img / 127.5 - 1.0
         return torch.from_numpy(img).permute(2, 0, 1)
@@ -140,7 +142,7 @@ class CustomDatasetWithBG(Dataset):
 
         image = Image.open(self.image_paths[i % self.num_images])
 
-        mask_path = self.image_paths[i % self.num_images].replace('.jpeg', '.png').replace('.jpg', '.png').replace('.JPEG', '.png')[:-4] + '_bg_bg.png'
+        mask_path = self.image_paths[i % self.num_images].replace('.jpeg', '.png').replace('.jpg', '.png').replace('.JPEG', '.png')[:-4] + '_bg.png'
         mask = np.array(Image.open(mask_path))
         
         mask = np.where(mask > 0, 1, 0)
@@ -151,6 +153,10 @@ class CustomDatasetWithBG(Dataset):
 
         image_np = np.array(image)
         object_tensor = image_np * mask
+        # covert numpy array to PIL Image
+        Image.fromarray(object_tensor.astype('uint8')).save('temp.png')
+        
+        
         example["pixel_values"] = self.process(image_np)
 
 
@@ -171,13 +177,15 @@ class OpenImagesDataset(Dataset):
         self,
         data_root,
         tokenizer,
-        size=512,
+        width=896,
+        height=384,
         interpolation="bicubic",
         placeholder_token="*",
     ):
         self.data_root = data_root
         self.tokenizer = tokenizer
-        self.size = size
+        self.width = width
+        self.height = height
         self.placeholder_token = placeholder_token
 
         self.random_trans = A.Compose([
@@ -188,18 +196,15 @@ class OpenImagesDataset(Dataset):
             A.ElasticTransform(p=0.3)
         ])
         
-        self.box_list = []
-        bbox_path = os.path.join(data_root, 'mask_box_small.txt')
+        self.img_list = []
+        imgtxt_file = os.path.join(data_root, 'mask_box.txt')
         # note read the bbox_path txt file using f
-        with open(bbox_path, 'r') as f:
+        with open(imgtxt_file, 'r') as f:
             for line in f:
-                img_id = line.strip().split('$')[0]
-                bbox = line.strip().split('$')[1].split(',')
-                bbox = [float(b) for b in bbox]
-                bbox.append(img_id)
-                self.box_list.append(bbox)
+                img_id = line.strip()
+                self.img_list.append(img_id)
 
-        self.num_images = len(self.box_list)
+        self.num_images = len(self.img_list)
 
         print('{}: total {} images ...'.format(set, self.num_images))
 
@@ -229,7 +234,7 @@ class OpenImagesDataset(Dataset):
 
     def process(self, image):
         img = np.array(image)
-        img = cv2.resize(img, (self.size, self.size), interpolation=cv2.INTER_CUBIC)
+        img = cv2.resize(img, (self.width, self.height), interpolation=cv2.INTER_CUBIC)
         img = np.array(img).astype(np.float32)
         img = img / 127.5 - 1.0
         return torch.from_numpy(img).permute(2, 0, 1)
@@ -269,31 +274,35 @@ class OpenImagesDataset(Dataset):
         example["index"] = index
         example["text"] = text
 
-        bbox_sample = self.box_list[i % self.num_images]
-        bbox_sample = copy.copy(bbox_sample)
+        img = self.img_list[i % self.num_images]
+  
 
-        file_name = bbox_sample[-1] + '.jpg'
-        img_path = os.path.join(self.data_root, 'data', file_name)
+        img_path = os.path.join(self.data_root, 'data', img)
+        img_p = Image.open(img_path).convert("RGB")
+        img_p_np = np.array(img_p)
+        
+        # load mask
+        mask = img.replace('.jpeg', '.png').replace('.jpg', '.png').replace('.JPEG', '.png')[:-4] + '_bg.png'
+        mask_path = os.path.join(self.data_root, 'mask', mask)
+        mask = np.array(Image.open(mask_path))
+        mask = np.where(mask > 0, 1, 0)
+        
+        image_tensor = img_p_np * mask
+        image_tensor = image_tensor.astype('uint8')
+        
+        # save image_tensor to PIL image for debuging and checking
+        Image.fromarray(image_tensor).save('temp.png')  
+              
+        # l_x, l_y, r_x, r_y,_ = bbox_sample
+        # l_x, l_y, r_x, r_y = int(l_x), int(l_y), int(r_x), int(r_y)
+        # note cut out the subject according to the bbox 
+        # image_tensor = img_p_np[l_y:r_y,l_x:r_x,:]
+        
+        example["pixel_values"] = self.process(image_tensor)
+        ref_image_tensor = self.random_trans(image=image_tensor)
+        ref_image_tensor = Image.fromarray(ref_image_tensor["image"])
+        example["pixel_values_clip"] = self.get_tensor_clip()(ref_image_tensor)
 
-        try:
-            img_p = Image.open(img_path).convert("RGB")
-            img_p_np = np.array(img_p)
-            lx, l_y, r_x, r_y = bbox_sample
-            l_x, l_y, r_x, r_y = int(l_x), int(l_y), int(r_x), int(r_y)
-            
-            # note cut out the subject according to the bbox 
-            image_tensor = img_p_np[l_y:r_y,l_x:r_x,:]
-            example["pixel_values"] = self.process(image_tensor)
-            
-            ref_image_tensor = self.random_trans(image=image_tensor)
-            ref_image_tensor = Image.fromarray(ref_image_tensor["image"])
-            example["pixel_values_clip"] = self.get_tensor_clip()(ref_image_tensor)
-
-        except Exception as e:
-            example["pixel_values"] = torch.zeros((3, 512, 512))
-            example["pixel_values_clip"] = torch.zeros((3, 224, 224))
-            with open('error.txt', 'a+') as f:
-                f.write(str(e) + '\n')
 
         return example
 
