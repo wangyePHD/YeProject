@@ -753,7 +753,7 @@ def main():
                 }).sample
 
                 loss_mle = F.mse_loss(noise_pred, noise, reduction="none").mean([1, 2, 3]).mean()
-                print(loss_mle)
+      
                 loss_reg = torch.mean(torch.abs(inj_embedding)) * 0.01
 
                 loss = loss_mle + loss_reg
