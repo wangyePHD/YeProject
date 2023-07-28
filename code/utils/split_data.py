@@ -4,11 +4,11 @@ from shutil import move
 from PIL import Image  # 如果使用PIL库
 # import cv2  # 如果使用opencv-python库
 
-source_folder_img = "/home/wangye/YeProject/openimage/train_data/data"  # 源文件夹路径
-source_folder_mask = "/home/wangye/YeProject/openimage/train_data/mask"  # 源文件夹路径
-destination_folder_img = "/home/wangye/YeProject/openimage/test_data/data"  # 目标文件夹路径
-destination_folder_mask = "/home/wangye/YeProject/openimage/test_data/mask"  # 目标文件夹路径
-num_images_to_select = 200  # 随机选择的图像数量
+source_folder_img = "/home/wangye/YeProject/openimage/v1/train_data/data"  # 源文件夹路径
+source_folder_mask = "/home/wangye/YeProject/openimage/v1/train_data/mask"  # 源文件夹路径
+destination_folder_img = "/home/wangye/YeProject/openimage/fast_verify/train/data"  # 目标文件夹路径
+destination_folder_mask = "/home/wangye/YeProject/openimage/fast_verify/train/mask"  # 目标文件夹路径
+num_images_to_select = 1000  # 随机选择的图像数量
 
 # 获取源文件夹下所有图像文件的路径
 image_files = [os.path.join(source_folder_img, file) for file in os.listdir(source_folder_img) if file.endswith(('.jpg', '.jpeg', '.png', '.gif'))]

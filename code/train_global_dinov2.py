@@ -161,6 +161,7 @@ def inj_forward_text(
     )
 
 def inj_forward_crossattention(self, hidden_states, encoder_hidden_states=None, attention_mask=None):
+  
     context = encoder_hidden_states
     if context is not None:
         context_tensor = context["CONTEXT_TENSOR"]
@@ -238,6 +239,9 @@ def parse_args():
     )
     parser.add_argument(
         "--train_data_dir", type=str, default=None, required=True, help="A folder containing the training data."
+    )
+    parser.add_argument(
+        "--val_data_dir", type=str, default=None, required=True, help="A folder containing the val data."
     )
     parser.add_argument(
         "--global_mapper_path", type=str, default=None, help="If not none, the training will start from the given checkpoints."
@@ -401,12 +405,12 @@ def validation(example, tokenizer, image_encoder, text_encoder, unet, mapper, va
 
     if seed is None:
         latents = torch.randn(
-            (example["pixel_values"].shape[0], unet.in_channels, 48, 112)
+            (example["pixel_values"].shape[0], unet.in_channels, 64, 64)
         )
     else:
         generator = torch.manual_seed(seed)
         latents = torch.randn(
-            (example["pixel_values"].shape[0], unet.in_channels, 48, 112), generator=generator,
+            (example["pixel_values"].shape[0], unet.in_channels, 64, 64), generator=generator,
         )
 
     latents = latents.to(example["pixel_values_clip"])
@@ -466,6 +470,61 @@ def validation(example, tokenizer, image_encoder, text_encoder, unet, mapper, va
 
     return ret_pil_images
 
+
+
+@torch.no_grad()
+def validate_loss(val_dataloader,vae,noise_scheduler,image_encoder,text_encoder,mapper,unet,accelerator,global_step,logger):
+    # for iteration in val_dataloader
+    loss_mle_avg = 0
+    loss_reg_avg = 0
+    for step, batch in enumerate(val_dataloader):
+       
+        
+        latents = vae.encode(batch["pixel_values"]).latent_dist.sample().detach()
+        latents = latents * 0.18215
+        
+        noise = torch.randn(latents.shape).to(latents.device)
+        bsz = latents.shape[0]
+        
+        timesteps = torch.randint(
+            0, noise_scheduler.config.num_train_timesteps, (bsz,), device=latents.device
+        ).long()
+        
+        noisy_latents = noise_scheduler.add_noise(latents, noise, timesteps)
+
+        placeholder_idx = batch["index"]
+        image = F.interpolate(batch["pixel_values_clip"], (224, 224), mode='bilinear')
+        image_features = image_encoder(image, output_hidden_states=True).last_hidden_state
+        
+        inj_embedding = mapper(image_features)
+                
+        # Get the text embedding for conditioning
+        encoder_hidden_states = text_encoder({'input_ids': batch["input_ids"],
+                                                "inj_embedding": inj_embedding,
+                                                "inj_index": placeholder_idx.detach()})[0]
+        
+        noise_pred = unet(noisy_latents, timesteps, encoder_hidden_states={
+            "CONTEXT_TENSOR": encoder_hidden_states,
+        }).sample
+
+        
+        loss_mle = F.mse_loss(noise_pred, noise, reduction="none").mean([1, 2, 3]).mean()
+
+        loss_reg = torch.mean(torch.abs(inj_embedding)) * 0.01
+
+        loss = loss_mle + loss_reg
+
+        loss_mle_avg = loss_mle_avg+loss_mle.detach().item()
+        loss_reg_avg = loss_reg_avg+loss_reg.detach().item()
+    
+    loss_mle_avg = loss_mle_avg / len(val_dataloader)
+    loss_reg_avg = loss_reg_avg / len(val_dataloader)
+    
+    logs = {"loss_mle_avg_val": loss_mle_avg, "loss_reg_avg_val": loss_reg_avg}
+    logger.info(logs)
+    accelerator.log(logs, step=global_step)
+    
+
 def main():
     
     
@@ -517,7 +576,6 @@ def main():
             _module.__class__.__call__ = inj_forward_text
             
     # note replace clip image encoder with DINOV2
-    image_processor = AutoImageProcessor.from_pretrained("facebook/dinov2-base")
     image_encoder = Dinov2Model.from_pretrained('facebook/dinov2-base')
 
     # image_encoder = CLIPVisionModel.from_pretrained("openai/clip-vit-large-patch14")
@@ -533,6 +591,7 @@ def main():
             if 'attn1' in _name: continue
             _module.__class__.__call__ = inj_forward_crossattention
 
+            # note SD预训练的权重进行初始化
             shape = _module.to_k.weight.shape
             to_k_global = nn.Linear(shape[1], shape[0], bias=False)
             to_k_global.weight.data = _module.to_k.weight.data.clone()
@@ -547,6 +606,7 @@ def main():
                 _module.add_module('to_k_global', to_k_global)
                 _module.add_module('to_v_global', to_v_global)
 
+    # note 给cross-attention添加to_k_global, to_v_global，本质上是引入新的参数
     if args.global_mapper_path is not None:
         mapper.load_state_dict(torch.load(args.global_mapper_path, map_location='cpu'))
         for _name, _module in unet.named_modules():
@@ -589,6 +649,16 @@ def main():
     )
     train_dataloader = torch.utils.data.DataLoader(train_dataset, batch_size=args.train_batch_size, shuffle=True)
 
+    # define val dataset and dataloader
+    val_datset = OpenImagesDataset(
+        data_root=args.val_data_dir,
+        tokenizer=tokenizer,
+        width=args.resolution_W,
+        height=args.resolution_H,
+        placeholder_token=args.placeholder_token
+    )
+    val_dataloader = torch.utils.data.DataLoader(val_datset, batch_size=args.train_batch_size, shuffle=False)
+
     # Scheduler and math around the number of training steps.
     overrode_max_train_steps = False
     num_update_steps_per_epoch = math.ceil(len(train_dataloader) / args.gradient_accumulation_steps)
@@ -603,8 +673,8 @@ def main():
         num_training_steps=args.max_train_steps * args.gradient_accumulation_steps,
     )
 
-    mapper, optimizer, train_dataloader, lr_scheduler = accelerator.prepare(
-        mapper, optimizer, train_dataloader, lr_scheduler
+    mapper, optimizer, train_dataloader, val_dataloader, lr_scheduler = accelerator.prepare(
+        mapper, optimizer, train_dataloader, val_dataloader,lr_scheduler
     )
 
     # Move vae, unet, and encoders to device
@@ -643,12 +713,15 @@ def main():
     progress_bar = tqdm(range(args.max_train_steps), disable=not accelerator.is_local_main_process)
     progress_bar.set_description("Steps")
     global_step = 0
-
+    loss_mse_avg = 0
+    loss_reg_avg = 0
+    
     for epoch in range(args.num_train_epochs):
         mapper.train()
         for step, batch in enumerate(train_dataloader):
             with accelerator.accumulate(mapper):
                 # Convert images to latent space
+               
                 latents = vae.encode(batch["pixel_values"]).latent_dist.sample().detach()
                 latents = latents * 0.18215
 
@@ -675,7 +748,7 @@ def main():
                 encoder_hidden_states = text_encoder({'input_ids': batch["input_ids"],
                                                       "inj_embedding": inj_embedding,
                                                       "inj_index": placeholder_idx.detach()})[0]
-
+                
                 noise_pred = unet(noisy_latents, timesteps, encoder_hidden_states={
                     "CONTEXT_TENSOR": encoder_hidden_states,
                 }).sample
@@ -694,8 +767,10 @@ def main():
                 optimizer.step()
                 lr_scheduler.step()
                 optimizer.zero_grad()
-
-
+            
+            loss_mse_avg = loss_mse_avg + loss_mle.detach().item()
+            loss_reg_avg = loss_reg_avg + loss_reg.detach().item()
+            
             # Checks if the accelerator has performed an optimization step behind the scenes
             if accelerator.sync_gradients:
                 progress_bar.update(1)
@@ -709,10 +784,21 @@ def main():
                         img_list.append(np.concatenate((np.array(syn), np.array(gt)), axis=1))
                     img_list = np.concatenate(img_list, axis=0)
                     Image.fromarray(img_list).save(os.path.join(args.output_dir, f"{str(global_step).zfill(5)}.jpg"))
-
+                    # 保存验证集的loss
+                    logger.info("验证中，请稍后.......")
+                    validate_loss(val_dataloader, vae, noise_scheduler, image_encoder, text_encoder, mapper, unet, accelerator, global_step,logger)
+                    logs = {"loss_mle_avg_train": loss_mse_avg/args.save_steps, "loss_reg_avg_train": loss_reg_avg/args.save_steps}
+                    logger.info(logs)
+                    logger.info("验证完成，继续训练.......")
+                    accelerator.log(logs, step=global_step)
+                    loss_mse_avg = 0
+                    loss_reg_avg = 0
+                    
+                    
             logs = {"loss_mle": loss_mle.detach().item(), "loss_reg": loss_reg.detach().item(),  "lr": lr_scheduler.get_last_lr()[0]}
             progress_bar.set_postfix(**logs)
             accelerator.log(logs, step=global_step)
+            
 
             if global_step >= args.max_train_steps:
                 break
