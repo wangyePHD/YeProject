@@ -1,5 +1,5 @@
 export MODEL_NAME="CompVis/stable-diffusion-v1-4"
-export DATA_DIR='/home/wangye/YeProject/openimage/test_data/mixed'
+export DATA_DIR='/home/wangye/YeProject_BAK/openimage/test_data/mixed'
 
 CUDA_VISIBLE_DEVICES=1 python inference_global_dinov2.py \
   --pretrained_model_name_or_path=$MODEL_NAME \

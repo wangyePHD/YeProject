@@ -1,6 +1,6 @@
 export MODEL_NAME="CompVis/stable-diffusion-v1-4"
-export DATA_DIR1='/home/wangye/YeProject/openimage/fast_verify/train'
-export DATA_DIR2='/home/wangye/YeProject/openimage/fast_verify/val'
+export DATA_DIR1='/home/wangye/YeProject_bak/openimage/fast_verify/train'
+export DATA_DIR2='/home/wangye/YeProject_bak/openimage/fast_verify/val'
 
 
 CUDA_VISIBLE_DEVICES=0,1 accelerate launch --config_file multi_gpu.json --main_process_port 25656 train_global_dinov2.py \

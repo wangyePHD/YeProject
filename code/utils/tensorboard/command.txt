@@ -1,0 +1,2 @@
+端口转发
+ssh -NfL 6006:localhost:6006 wangye@222.27.87.87

@@ -512,7 +512,6 @@ def validate_loss(val_dataloader,vae,noise_scheduler,image_encoder,text_encoder,
 
         loss_reg = torch.mean(torch.abs(inj_embedding)) * 0.01
 
-        loss = loss_mle + loss_reg
 
         loss_mle_avg = loss_mle_avg+loss_mle.detach().item()
         loss_reg_avg = loss_reg_avg+loss_reg.detach().item()
@@ -754,7 +753,7 @@ def main():
                 }).sample
 
                 loss_mle = F.mse_loss(noise_pred, noise, reduction="none").mean([1, 2, 3]).mean()
-
+                print(loss_mle)
                 loss_reg = torch.mean(torch.abs(inj_embedding)) * 0.01
 
                 loss = loss_mle + loss_reg
@@ -768,8 +767,8 @@ def main():
                 lr_scheduler.step()
                 optimizer.zero_grad()
             
-            loss_mse_avg = loss_mse_avg + loss_mle.detach().item()
-            loss_reg_avg = loss_reg_avg + loss_reg.detach().item()
+            loss_mse_avg = loss_mse_avg + loss_mle.detach().item() / args.gradient_accumulation_steps
+            loss_reg_avg = loss_reg_avg + loss_reg.detach().item() / args.gradient_accumulation_steps
             
             # Checks if the accelerator has performed an optimization step behind the scenes
             if accelerator.sync_gradients:
