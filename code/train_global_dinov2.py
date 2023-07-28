@@ -474,6 +474,7 @@ def validation(example, tokenizer, image_encoder, text_encoder, unet, mapper, va
 
 @torch.no_grad()
 def validate_loss(val_dataloader,vae,noise_scheduler,image_encoder,text_encoder,mapper,unet,accelerator,global_step,logger):
+    
     # for iteration in val_dataloader
     loss_mle_avg = 0
     loss_reg_avg = 0
@@ -714,7 +715,7 @@ def main():
     global_step = 0
     loss_mse_avg = 0
     loss_reg_avg = 0
-    
+
     for epoch in range(args.num_train_epochs):
         mapper.train()
         for step, batch in enumerate(train_dataloader):
@@ -753,7 +754,6 @@ def main():
                 }).sample
 
                 loss_mle = F.mse_loss(noise_pred, noise, reduction="none").mean([1, 2, 3]).mean()
-      
                 loss_reg = torch.mean(torch.abs(inj_embedding)) * 0.01
 
                 loss = loss_mle + loss_reg
@@ -766,15 +766,16 @@ def main():
                 optimizer.step()
                 lr_scheduler.step()
                 optimizer.zero_grad()
-            
             loss_mse_avg = loss_mse_avg + loss_mle.detach().item() / args.gradient_accumulation_steps
             loss_reg_avg = loss_reg_avg + loss_reg.detach().item() / args.gradient_accumulation_steps
             
+
             # Checks if the accelerator has performed an optimization step behind the scenes
             if accelerator.sync_gradients:
                 progress_bar.update(1)
                 global_step += 1
                 if global_step % args.save_steps == 0:
+                    
                     save_progress(mapper, accelerator, args, global_step)
                     syn_images = validation(batch, tokenizer, image_encoder, text_encoder, unet, mapper, vae, batch["pixel_values_clip"].device, 5)
                     gt_images = [th2image(img) for img in batch["pixel_values"]]
@@ -785,7 +786,9 @@ def main():
                     Image.fromarray(img_list).save(os.path.join(args.output_dir, f"{str(global_step).zfill(5)}.jpg"))
                     # 保存验证集的loss
                     logger.info("验证中，请稍后.......")
+                    mapper.eval()
                     validate_loss(val_dataloader, vae, noise_scheduler, image_encoder, text_encoder, mapper, unet, accelerator, global_step,logger)
+                    mapper.train()
                     logs = {"loss_mle_avg_train": loss_mse_avg/args.save_steps, "loss_reg_avg_train": loss_reg_avg/args.save_steps}
                     logger.info(logs)
                     logger.info("验证完成，继续训练.......")
