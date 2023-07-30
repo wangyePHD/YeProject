@@ -11,6 +11,7 @@ import torch.nn.functional as F
 import torch.utils.checkpoint
 from torch.utils.data import Dataset
 
+import PIL
 from accelerate import Accelerator
 from accelerate.logging import get_logger
 from accelerate.utils import set_seed
@@ -18,30 +19,23 @@ from diffusers import AutoencoderKL, DDPMScheduler, UNet2DConditionModel, LMSDis
 from diffusers.optimization import get_scheduler
 from huggingface_hub import HfFolder, Repository, whoami
 
-from transformers.modeling_outputs import BaseModelOutputWithPooling
-from transformers.utils import (
-    add_start_docstrings_to_model_forward,
-    replace_return_docstrings,
-)
-from transformers.models.clip.configuration_clip import CLIPTextConfig
-from transformers.models.clip.modeling_clip import CLIP_TEXT_INPUTS_DOCSTRING, _expand_mask
-from transformers import AutoImageProcessor, Dinov2Model
-
 from PIL import Image
 from tqdm.auto import tqdm
-from transformers import CLIPTextModel, CLIPTokenizer, CLIPVisionModel
-
-from typing import Optional, Tuple, Union
-from datasets import OpenImagesDataset
+from transformers import CLIPTextModel, CLIPTokenizer, CLIPVisionModel, Dinov2Model
 
 
+from typing import Optional
+from train_global_dinov2 import inj_forward_text, th2image, Mapper
+from datasets import OpenImagesDatasetWithMask
 
-class Mapper(nn.Module):
+
+
+class MapperLocal(nn.Module):
     def __init__(self,
         input_dim: int,
         output_dim: int,
     ):
-        super(Mapper, self).__init__()
+        super(MapperLocal, self).__init__()
         
         self.layer1 = nn.Linear(input_dim, 1024)
         self.norm1  = nn.LayerNorm(1024) 
@@ -65,104 +59,12 @@ class Mapper(nn.Module):
         return out
 
 
-def _build_causal_attention_mask(bsz, seq_len, dtype):
-    # lazily create causal attention mask, with full attention between the vision tokens
-    # pytorch uses additive attention mask; fill with -inf
-    mask = torch.empty(bsz, seq_len, seq_len, dtype=dtype)
-    mask.fill_(torch.tensor(torch.finfo(dtype).min))
-    mask.triu_(1)  # zero out the lower diagonal
-    mask = mask.unsqueeze(1)  # expand mask
-    return mask
-
-
-@add_start_docstrings_to_model_forward(CLIP_TEXT_INPUTS_DOCSTRING)
-@replace_return_docstrings(output_type=BaseModelOutputWithPooling, config_class=CLIPTextConfig)
-def inj_forward_text(
-        self,
-        input_ids: Optional[torch.Tensor] = None,
-        attention_mask: Optional[torch.Tensor] = None,
-        position_ids: Optional[torch.Tensor] = None,
-        output_attentions: Optional[bool] = None,
-        output_hidden_states: Optional[bool] = None,
-        return_dict: Optional[bool] = None,
-) -> Union[Tuple, BaseModelOutputWithPooling]:
-    r"""
-    Returns:
-    """
-    output_attentions = output_attentions if output_attentions is not None else self.config.output_attentions
-    output_hidden_states = (
-        output_hidden_states if output_hidden_states is not None else self.config.output_hidden_states
-    )
-    return_dict = return_dict if return_dict is not None else self.config.use_return_dict
-
-    if input_ids is None:
-        raise ValueError("You have to specify either input_ids")
-
-    r_input_ids = input_ids['input_ids']
-    if 'inj_embedding' in input_ids:
-        inj_embedding = input_ids['inj_embedding']
-        inj_index = input_ids['inj_index']
-    else:
-        inj_embedding = None
-        inj_index = None
-
-    input_shape = r_input_ids.size()
-    r_input_ids = r_input_ids.view(-1, input_shape[-1])
-
-    inputs_embeds = self.embeddings.token_embedding(r_input_ids)
-    new_inputs_embeds = inputs_embeds.clone()
-    if inj_embedding is not None:
-        emb_length = inj_embedding.shape[1]
-        for bsz, idx in enumerate(inj_index):
-            lll = new_inputs_embeds[bsz, idx+emb_length:].shape[0]
-            new_inputs_embeds[bsz, idx+emb_length:] = inputs_embeds[bsz, idx+1:idx+1+lll]
-            new_inputs_embeds[bsz, idx:idx+emb_length] = inj_embedding[bsz]
-
-    hidden_states = self.embeddings(input_ids=r_input_ids, position_ids=position_ids, inputs_embeds=new_inputs_embeds)
-
-    bsz, seq_len = input_shape
-    # CLIP's text model uses causal mask, prepare it here.
-    # https://github.com/openai/CLIP/blob/cfcffb90e69f37bf2ff1e988237a0fbe41f33c04/clip/model.py#L324
-    causal_attention_mask = _build_causal_attention_mask(bsz, seq_len, hidden_states.dtype).to(
-        hidden_states.device
-    )
-    # expand attention_mask
-    if attention_mask is not None:
-        # [bsz, seq_len] -> [bsz, 1, tgt_seq_len, src_seq_len]
-        attention_mask = _expand_mask(attention_mask, hidden_states.dtype)
-
-    encoder_outputs = self.encoder(
-        inputs_embeds=hidden_states,
-        attention_mask=attention_mask,
-        causal_attention_mask=causal_attention_mask,
-        output_attentions=output_attentions,
-        output_hidden_states=output_hidden_states,
-        return_dict=return_dict,
-    )
-
-    last_hidden_state = encoder_outputs[0]
-    last_hidden_state = self.final_layer_norm(last_hidden_state)
-
-    # text_embeds.shape = [batch_size, sequence_length, transformer.width]
-    # take features from the eot embedding (eot_token is the highest number in each sequence)
-    # casting to torch.int for onnx compatibility: argmax doesn't support int64 inputs with opset 14
-    pooled_output = last_hidden_state[
-        torch.arange(last_hidden_state.shape[0], device=r_input_ids.device), r_input_ids.to(torch.int).argmax(dim=-1)
-    ]
-
-    if not return_dict:
-        return (last_hidden_state, pooled_output) + encoder_outputs[1:]
-
-    return BaseModelOutputWithPooling(
-        last_hidden_state=last_hidden_state,
-        pooler_output=pooled_output,
-        hidden_states=encoder_outputs.hidden_states,
-        attentions=encoder_outputs.attentions,
-    )
+value_local_list = []
 
 def inj_forward_crossattention(self, hidden_states, encoder_hidden_states=None, attention_mask=None):
-  
+
     context = encoder_hidden_states
+    hidden_states_local = hidden_states.clone()
     if context is not None:
         context_tensor = context["CONTEXT_TENSOR"]
     else:
@@ -171,6 +73,7 @@ def inj_forward_crossattention(self, hidden_states, encoder_hidden_states=None, 
     batch_size, sequence_length, _ = hidden_states.shape
 
     query = self.to_q(hidden_states)
+
     if context is not None:
         key = self.to_k_global(context_tensor)
         value = self.to_v_global(context_tensor)
@@ -184,12 +87,46 @@ def inj_forward_crossattention(self, hidden_states, encoder_hidden_states=None, 
     key = self.reshape_heads_to_batch_dim(key)
     value = self.reshape_heads_to_batch_dim(value)
 
+
     attention_scores = torch.matmul(query, key.transpose(-1, -2))
     attention_scores = attention_scores * self.scale
 
     attention_probs = attention_scores.softmax(dim=-1)
 
     hidden_states = torch.matmul(attention_probs, value)
+
+    if context is not None and "LOCAL" in context:
+        # Perform cross attention with the local context
+        query_local = self.to_q(hidden_states_local)
+        key_local = self.to_k_local(context["LOCAL"])
+        value_local = self.to_v_local(context["LOCAL"])
+
+        query_local = self.reshape_heads_to_batch_dim(query_local)
+        key_local = self.reshape_heads_to_batch_dim(key_local)
+        value_local = self.reshape_heads_to_batch_dim(value_local)
+
+        attention_scores_local = torch.matmul(query_local, key_local.transpose(-1, -2))
+        attention_scores_local = attention_scores_local * self.scale
+        attention_probs_local = attention_scores_local.softmax(dim=-1)
+
+        # To extract the attmap of learned [w] 
+        # note utilize global attention prob to reweight the local attention
+        index_local = context["LOCAL_INDEX"]
+        index_local = index_local.reshape(index_local.shape[0], 1).repeat((1, self.heads)).reshape(-1)
+        attention_probs_clone = attention_probs.clone().permute((0, 2, 1))
+        attention_probs_mask = attention_probs_clone[torch.arange(index_local.shape[0]), index_local]
+        # Normalize the attention map
+        attention_probs_mask = attention_probs_mask.unsqueeze(2) / attention_probs_mask.max()
+
+        if "LAMBDA" in context:
+            _lambda = context["LAMBDA"]
+        else:
+            _lambda = 1
+
+        attention_probs_local = attention_probs_local * attention_probs_mask * _lambda
+        hidden_states += torch.matmul(attention_probs_local, value_local)
+        value_local_list.append(value_local)
+
     hidden_states = self.reshape_batch_dim_to_heads(hidden_states)
 
     # linear proj
@@ -199,9 +136,8 @@ def inj_forward_crossattention(self, hidden_states, encoder_hidden_states=None, 
 
     return hidden_states
 
+# ------------------------------------------------------------------------------
 
-import logging
-logging.basicConfig(level=logging.INFO)
 logger = get_logger(__name__)
 
 
@@ -211,9 +147,9 @@ def save_progress(mapper, accelerator, args, step=None):
     state_dict = accelerator.unwrap_model(mapper).state_dict()
 
     if step is not None:
-        torch.save(state_dict, os.path.join(args.output_dir, f"mapper_{str(step).zfill(6)}.pt"))
+        torch.save(state_dict, os.path.join(args.output_dir, f"local_mapper_{str(step).zfill(6)}.pt"))
     else:
-        torch.save(state_dict, os.path.join(args.output_dir, "mapper.pt"))
+        torch.save(state_dict, os.path.join(args.output_dir, "local_mapper.pt"))
 
 
 def parse_args():
@@ -241,10 +177,12 @@ def parse_args():
         "--train_data_dir", type=str, default=None, required=True, help="A folder containing the training data."
     )
     parser.add_argument(
-        "--val_data_dir", type=str, default=None, required=True, help="A folder containing the val data."
+        "--global_mapper_path", type=str, default=None,
+        help="If not none, the training will start from the given checkpoints."
     )
     parser.add_argument(
-        "--global_mapper_path", type=str, default=None, help="If not none, the training will start from the given checkpoints."
+        "--local_mapper_path", type=str, default=None,
+        help="If not none, the training will start from the given checkpoints."
     )
     parser.add_argument(
         "--placeholder_token",
@@ -371,6 +309,7 @@ def get_full_repo_name(model_id: str, organization: Optional[str] = None, token:
     else:
         return f"{organization}/{model_id}"
 
+
 def freeze_params(params):
     for param in params:
         param.requires_grad = False
@@ -379,15 +318,9 @@ def unfreeze_params(params):
     for param in params:
         param.requires_grad = True
 
-def th2image(image):
-    image = (image / 2 + 0.5).clamp(0, 1)
-    image = image.detach().cpu().permute(1, 2, 0).numpy()
-    image = (image * 255).round().astype("uint8")
-    return Image.fromarray(image)
-
 
 @torch.no_grad()
-def validation(example, tokenizer, image_encoder, text_encoder, unet, mapper, vae, device, guidance_scale, token_index='full', seed=None):
+def validation(example, tokenizer, image_encoder, text_encoder, unet, mapper, mapper_local, vae, device, guidance_scale, seed=None, llambda=1, num_steps=100):
     scheduler = LMSDiscreteScheduler(
         beta_start=0.00085,
         beta_end=0.012,
@@ -414,38 +347,47 @@ def validation(example, tokenizer, image_encoder, text_encoder, unet, mapper, va
         )
 
     latents = latents.to(example["pixel_values_clip"])
-    scheduler.set_timesteps(100)
+    scheduler.set_timesteps(num_steps)
     latents = latents * scheduler.init_noise_sigma
 
     placeholder_idx = example["index"]
+
     image = F.interpolate(example["pixel_values_clip"], (224, 224), mode='bilinear')
+    image_features = image_encoder(image, output_hidden_states=True)
+    image_embeddings = [image_features[0], image_features[2][4], image_features[2][8], image_features[2][12], image_features[2][16]]
+    image_embeddings = [emb.detach() for emb in image_embeddings]
+    inj_embedding = mapper(image_embeddings)
 
-   
-    
-    image_features = image_encoder(image, output_hidden_states=True).last_hidden_state
-    inj_embedding = mapper(image_features)
-
-    if token_index != 'full':
-        
-        token_index = int(token_index)
-        inj_embedding = inj_embedding[:, token_index:token_index + 1, :]
-
-    
+    inj_embedding = inj_embedding[:, 0:1, :]
     encoder_hidden_states = text_encoder({'input_ids': example["input_ids"],
                                           "inj_embedding": inj_embedding,
                                           "inj_index": placeholder_idx})[0]
 
+    image_obj = F.interpolate(example["pixel_values_obj"], (224, 224), mode='bilinear')
+    image_features_obj = image_encoder(image_obj, output_hidden_states=True)
+    image_embeddings_obj = [image_features_obj[0], image_features_obj[2][4], image_features_obj[2][8],
+                            image_features_obj[2][12], image_features_obj[2][16]]
+    image_embeddings_obj = [emb.detach() for emb in image_embeddings_obj]
+
+    inj_embedding_local = mapper_local(image_embeddings_obj)
+    mask = F.interpolate(example["pixel_values_seg"], (16, 16), mode='nearest')
+    mask = mask[:, 0].reshape(mask.shape[0], -1, 1)
+    inj_embedding_local = inj_embedding_local * mask
+
+
     for t in tqdm(scheduler.timesteps):
         latent_model_input = scheduler.scale_model_input(latents, t)
-        
         noise_pred_text = unet(
             latent_model_input,
             t,
             encoder_hidden_states={
                 "CONTEXT_TENSOR": encoder_hidden_states,
+                "LOCAL": inj_embedding_local,
+                "LOCAL_INDEX": placeholder_idx.detach(),
+                "LAMBDA": llambda
             }
         ).sample
-
+        value_local_list.clear()
         latent_model_input = scheduler.scale_model_input(latents, t)
 
         noise_pred_uncond = unet(
@@ -455,7 +397,7 @@ def validation(example, tokenizer, image_encoder, text_encoder, unet, mapper, va
                 "CONTEXT_TENSOR": uncond_embeddings,
             }
         ).sample
-
+        value_local_list.clear()
         noise_pred = noise_pred_uncond + guidance_scale * (
                 noise_pred_text - noise_pred_uncond
         )
@@ -465,69 +407,11 @@ def validation(example, tokenizer, image_encoder, text_encoder, unet, mapper, va
 
     _latents = 1 / 0.18215 * latents.clone()
     images = vae.decode(_latents).sample
-
     ret_pil_images = [th2image(image) for image in images]
 
     return ret_pil_images
 
-
-
-@torch.no_grad()
-def validate_loss(val_dataloader,vae,noise_scheduler,image_encoder,text_encoder,mapper,unet,accelerator,global_step,logger):
-    
-    # for iteration in val_dataloader
-    loss_mle_avg = 0
-    loss_reg_avg = 0
-    for step, batch in enumerate(val_dataloader):
-       
-        
-        latents = vae.encode(batch["pixel_values"]).latent_dist.sample().detach()
-        latents = latents * 0.18215
-        
-        noise = torch.randn(latents.shape).to(latents.device)
-        bsz = latents.shape[0]
-        
-        timesteps = torch.randint(
-            0, noise_scheduler.config.num_train_timesteps, (bsz,), device=latents.device
-        ).long()
-        
-        noisy_latents = noise_scheduler.add_noise(latents, noise, timesteps)
-
-        placeholder_idx = batch["index"]
-        image = F.interpolate(batch["pixel_values_clip"], (224, 224), mode='bilinear')
-        image_features = image_encoder(image, output_hidden_states=True).last_hidden_state
-        
-        inj_embedding = mapper(image_features)
-                
-        # Get the text embedding for conditioning
-        encoder_hidden_states = text_encoder({'input_ids': batch["input_ids"],
-                                                "inj_embedding": inj_embedding,
-                                                "inj_index": placeholder_idx.detach()})[0]
-        
-        noise_pred = unet(noisy_latents, timesteps, encoder_hidden_states={
-            "CONTEXT_TENSOR": encoder_hidden_states,
-        }).sample
-
-        
-        loss_mle = F.mse_loss(noise_pred, noise, reduction="none").mean([1, 2, 3]).mean()
-
-        loss_reg = torch.mean(torch.abs(inj_embedding)) * 0.01
-
-
-        loss_mle_avg = loss_mle_avg+loss_mle.detach().item()
-        loss_reg_avg = loss_reg_avg+loss_reg.detach().item()
-    
-    loss_mle_avg = loss_mle_avg / len(val_dataloader)
-    loss_reg_avg = loss_reg_avg / len(val_dataloader)
-    
-    logs = {"loss_mle_avg_val": loss_mle_avg, "loss_reg_avg_val": loss_reg_avg}
-    logger.info(logs)
-    accelerator.log(logs, step=global_step)
-    
-
 def main():
-    
-    
     args = parse_args()
     logging_dir = os.path.join(args.output_dir, args.logging_dir)
 
@@ -536,10 +420,8 @@ def main():
         mixed_precision=args.mixed_precision,
         log_with="tensorboard",
         project_dir=logging_dir,
-        
     )
- 
-    
+
     # If passed along, set the training seed now.
     if args.seed is not None:
         set_seed(args.seed)
@@ -562,25 +444,22 @@ def main():
             os.makedirs(args.output_dir, exist_ok=True)
 
     # Load the tokenizer and add the placeholder token as a additional special token
-    if args.tokenizer_name:
-        tokenizer = CLIPTokenizer.from_pretrained(args.tokenizer_name)
-    elif args.pretrained_model_name_or_path:
-        tokenizer = CLIPTokenizer.from_pretrained("openai/clip-vit-large-patch14")
 
+    tokenizer = CLIPTokenizer.from_pretrained("openai/clip-vit-large-patch14")
     # Load models and create wrapper for stable diffusion
     text_encoder = CLIPTextModel.from_pretrained("openai/clip-vit-large-patch14")
 
-    # replace the forward method of the text encoder to inject the word embedding
     for _module in text_encoder.modules():
         if _module.__class__.__name__ == "CLIPTextTransformer":
             _module.__class__.__call__ = inj_forward_text
             
-    # note replace clip image encoder with DINOV2
-    image_encoder = Dinov2Model.from_pretrained('facebook/dinov2-giant')
-
+    # todo replace with DINO V2 and mapper
     # image_encoder = CLIPVisionModel.from_pretrained("openai/clip-vit-large-patch14")
-
-    mapper = Mapper(input_dim=1536, output_dim=768)
+    # mapper = Mapper(input_dim=1024, output_dim=768)
+    image_encoder = Dinov2Model.from_pretrained('facebook/dinov2-base')
+    mapper = Mapper(input_dim=768, output_dim=768)
+    
+    mapper_local = MapperLocal(input_dim=768, output_dim=768)
 
     vae = AutoencoderKL.from_pretrained(args.pretrained_model_name_or_path, subfolder="vae")
     unet = UNet2DConditionModel.from_pretrained(args.pretrained_model_name_or_path, subfolder="unet")
@@ -591,7 +470,6 @@ def main():
             if 'attn1' in _name: continue
             _module.__class__.__call__ = inj_forward_crossattention
 
-            # note SD预训练的权重进行初始化
             shape = _module.to_k.weight.shape
             to_k_global = nn.Linear(shape[1], shape[0], bias=False)
             to_k_global.weight.data = _module.to_k.weight.data.clone()
@@ -602,11 +480,24 @@ def main():
             to_v_global.weight.data = _module.to_v.weight.data.clone()
             mapper.add_module(f'{_name.replace(".", "_")}_to_v', to_v_global)
 
+            to_k_local = nn.Linear(shape[1], shape[0], bias=False)
+            to_k_local.weight.data = _module.to_k.weight.data.clone()
+            mapper_local.add_module(f'{_name.replace(".", "_")}_to_k', to_k_local)
+            _module.add_module('to_k_local', to_k_local)
+
+            to_v_local = nn.Linear(shape[1], shape[0], bias=False)
+            to_v_local.weight.data = _module.to_v.weight.data.clone()
+            mapper_local.add_module(f'{_name.replace(".", "_")}_to_v', to_v_local)
+            _module.add_module('to_v_local', to_v_local)
+
             if args.global_mapper_path is None:
                 _module.add_module('to_k_global', to_k_global)
                 _module.add_module('to_v_global', to_v_global)
 
-    # note 给cross-attention添加to_k_global, to_v_global，本质上是引入新的参数
+            if args.local_mapper_path is None:
+                _module.add_module('to_k_local', to_k_local)
+                _module.add_module('to_v_local', to_v_local)
+
     if args.global_mapper_path is not None:
         mapper.load_state_dict(torch.load(args.global_mapper_path, map_location='cpu'))
         for _name, _module in unet.named_modules():
@@ -615,15 +506,21 @@ def main():
                 _module.add_module('to_k_global', getattr(mapper, f'{_name.replace(".", "_")}_to_k'))
                 _module.add_module('to_v_global', getattr(mapper, f'{_name.replace(".", "_")}_to_v'))
 
-    # Freeze vae and unet, encoder
+    if args.local_mapper_path is not None:
+        mapper_local.load_state_dict(torch.load(args.local_mapper_path, map_location='cpu'))
+        for _name, _module in unet.named_modules():
+            if _module.__class__.__name__ == "CrossAttention":
+                if 'attn1' in _name: continue
+                _module.add_module('to_k_local', getattr(mapper_local, f'{_name.replace(".", "_")}_to_k'))
+                _module.add_module('to_v_local', getattr(mapper_local, f'{_name.replace(".", "_")}_to_v'))
+
+    # Freeze vae and unet
     freeze_params(vae.parameters())
     freeze_params(unet.parameters())
     freeze_params(text_encoder.parameters())
     freeze_params(image_encoder.parameters())
+    unfreeze_params(mapper_local.parameters())
 
-    # Unfreeze the mapper
-    unfreeze_params(mapper.parameters())
-    
     if args.scale_lr:
         args.learning_rate = (
             args.learning_rate * args.gradient_accumulation_steps * args.train_batch_size * accelerator.num_processes
@@ -631,7 +528,7 @@ def main():
 
     # Initialize the optimizer
     optimizer = torch.optim.AdamW(
-        itertools.chain(mapper.parameters()),  # only optimize the embeddings
+        itertools.chain(mapper_local.parameters()),  # only optimize the embeddings
         lr=args.learning_rate,
         betas=(args.adam_beta1, args.adam_beta2),
         weight_decay=args.adam_weight_decay,
@@ -640,24 +537,16 @@ def main():
 
     noise_scheduler = DDPMScheduler.from_config(args.pretrained_model_name_or_path, subfolder="scheduler")
 
-    train_dataset = OpenImagesDataset(
+    train_dataset = OpenImagesDatasetWithMask(
         data_root=args.train_data_dir,
         tokenizer=tokenizer,
         width=args.resolution_W,
         height=args.resolution_H,
-        placeholder_token=args.placeholder_token
+        placeholder_token=args.placeholder_token,
+        set="train"
     )
+    
     train_dataloader = torch.utils.data.DataLoader(train_dataset, batch_size=args.train_batch_size, shuffle=True)
-
-    # define val dataset and dataloader
-    val_datset = OpenImagesDataset(
-        data_root=args.val_data_dir,
-        tokenizer=tokenizer,
-        width=args.resolution_W,
-        height=args.resolution_H,
-        placeholder_token=args.placeholder_token
-    )
-    val_dataloader = torch.utils.data.DataLoader(val_datset, batch_size=args.train_batch_size, shuffle=False)
 
     # Scheduler and math around the number of training steps.
     overrode_max_train_steps = False
@@ -673,19 +562,21 @@ def main():
         num_training_steps=args.max_train_steps * args.gradient_accumulation_steps,
     )
 
-    mapper, optimizer, train_dataloader, val_dataloader, lr_scheduler = accelerator.prepare(
-        mapper, optimizer, train_dataloader, val_dataloader,lr_scheduler
+    mapper_local, optimizer, train_dataloader, lr_scheduler = accelerator.prepare(
+        mapper_local, optimizer, train_dataloader, lr_scheduler
     )
 
-    # Move vae, unet, and encoders to device
+    # Move vae and unet to device
     vae.to(accelerator.device)
     unet.to(accelerator.device)
     image_encoder.to(accelerator.device)
     text_encoder.to(accelerator.device)
-    # Keep vae, unet and image_encoder in eval model as we don't train these
+    mapper.to(accelerator.device)
+    # Keep vae and unet in eval model as we don't train these
     vae.eval()
     unet.eval()
     image_encoder.eval()
+    mapper.eval()
 
     # We need to recalculate our total training steps as the size of the training dataloader may have changed.
     num_update_steps_per_epoch = math.ceil(len(train_dataloader) / args.gradient_accumulation_steps)
@@ -701,27 +592,24 @@ def main():
 
     # Train!
     total_batch_size = args.train_batch_size * accelerator.num_processes * args.gradient_accumulation_steps
-  
-    logger.info("***** Running training *****",main_process_only=True)
-    logger.info(f"  Num examples = {len(train_dataset)}",main_process_only=True)
-    logger.info(f"  Num Epochs = {args.num_train_epochs}",main_process_only=True)
-    logger.info(f"  Instantaneous batch size per device = {args.train_batch_size}",main_process_only=True)
-    logger.info(f"  Total train batch size (w. parallel, distributed & accumulation) = {total_batch_size}",main_process_only=True)
-    logger.info(f"  Gradient Accumulation steps = {args.gradient_accumulation_steps}",main_process_only=True)
-    logger.info(f"  Total optimization steps = {args.max_train_steps}",main_process_only=True)
+
+    logger.info("***** Running training *****")
+    logger.info(f"  Num examples = {len(train_dataset)}")
+    logger.info(f"  Num Epochs = {args.num_train_epochs}")
+    logger.info(f"  Instantaneous batch size per device = {args.train_batch_size}")
+    logger.info(f"  Total train batch size (w. parallel, distributed & accumulation) = {total_batch_size}")
+    logger.info(f"  Gradient Accumulation steps = {args.gradient_accumulation_steps}")
+    logger.info(f"  Total optimization steps = {args.max_train_steps}")
     # Only show the progress bar once on each machine.
     progress_bar = tqdm(range(args.max_train_steps), disable=not accelerator.is_local_main_process)
     progress_bar.set_description("Steps")
     global_step = 0
-    loss_mse_avg = 0
-    loss_reg_avg = 0
 
     for epoch in range(args.num_train_epochs):
-        mapper.train()
+        mapper_local.train()
         for step, batch in enumerate(train_dataloader):
-            with accelerator.accumulate(mapper):
+            with accelerator.accumulate(mapper_local):
                 # Convert images to latent space
-               
                 latents = vae.encode(batch["pixel_values"]).latent_dist.sample().detach()
                 latents = latents * 0.18215
 
@@ -739,76 +627,82 @@ def main():
 
                 placeholder_idx = batch["index"]
                 image = F.interpolate(batch["pixel_values_clip"], (224, 224), mode='bilinear')
+                image_obj = F.interpolate(batch["pixel_values_obj"], (224, 224), mode='bilinear')
+
+                # note DINO outputs
                 image_features = image_encoder(image, output_hidden_states=True).last_hidden_state
-                # image_embeddings = [image_features[0], image_features[2][4], image_features[2][8], image_features[2][12], image_features[2][16]]
-                # image_embeddings = [emb.detach() for emb in image_embeddings]
                 inj_embedding = mapper(image_features)
-                
+
+                # only use the first word
+                inj_embedding = inj_embedding[:, 0:1, :]
+
                 # Get the text embedding for conditioning
                 encoder_hidden_states = text_encoder({'input_ids': batch["input_ids"],
                                                       "inj_embedding": inj_embedding,
                                                       "inj_index": placeholder_idx.detach()})[0]
+
+                image_features_obj = image_encoder(image_obj, output_hidden_states=True).last_hidden_state
+                inj_embedding_local = mapper_local(image_features_obj)
                 
+
                 noise_pred = unet(noisy_latents, timesteps, encoder_hidden_states={
                     "CONTEXT_TENSOR": encoder_hidden_states,
+                    "LOCAL": inj_embedding_local,
+                    "LOCAL_INDEX": placeholder_idx.detach()
                 }).sample
 
-                loss_mle = F.mse_loss(noise_pred, noise, reduction="none").mean([1, 2, 3]).mean()
-                loss_reg = torch.mean(torch.abs(inj_embedding)) * 0.01
+                # note by wy: only calculate loss on the valid auged image region
+                mask_values = batch["mask_values"]
+                loss_mle = F.mse_loss(noise_pred, noise, reduction="none")
+                loss_mle = ((loss_mle*mask_values).sum([1, 2, 3])/mask_values.sum([1, 2, 3])).mean()
+
+                loss_reg = 0
+                for vvv in value_local_list:
+                    loss_reg += torch.mean(torch.abs(vvv))
+                loss_reg = loss_reg / len(value_local_list) * 0.0001
 
                 loss = loss_mle + loss_reg
 
                 accelerator.backward(loss)
 
                 if accelerator.sync_gradients:
-                    accelerator.clip_grad_norm_(mapper.parameters(), 1)
+                    accelerator.clip_grad_norm_(mapper_local.parameters(), 1)
 
                 optimizer.step()
                 lr_scheduler.step()
                 optimizer.zero_grad()
-            loss_mse_avg = loss_mse_avg + loss_mle.detach().item() / args.gradient_accumulation_steps
-            loss_reg_avg = loss_reg_avg + loss_reg.detach().item() / args.gradient_accumulation_steps
-            
+                value_local_list.clear()
+
 
             # Checks if the accelerator has performed an optimization step behind the scenes
             if accelerator.sync_gradients:
                 progress_bar.update(1)
                 global_step += 1
                 if global_step % args.save_steps == 0:
-                    
-                    save_progress(mapper, accelerator, args, global_step)
-                    syn_images = validation(batch, tokenizer, image_encoder, text_encoder, unet, mapper, vae, batch["pixel_values_clip"].device, 5)
-                    gt_images = [th2image(img) for img in batch["pixel_values"]]
+                    save_progress(mapper_local, accelerator, args, global_step)
+                    syn_images = validation(batch, tokenizer, image_encoder, text_encoder, unet, mapper, mapper_local, vae, batch["pixel_values_clip"].device, 5)
+                    input_images = [th2image(img) for img in batch["pixel_values"]]
+                    clip_images = [th2image(img).resize((512, 512)) for img in batch["pixel_values_clip"]]
+                    obj_images = [th2image(img).resize((512, 512)) for img in batch["pixel_values_obj"]]
+                    input_masks = torch.cat([mask_values, mask_values, mask_values], dim=1)
+                    input_masks = [th2image(img).resize((512, 512)) for img in input_masks]
                     img_list = []
-                    for syn, gt in zip(syn_images, gt_images):
-                        img_list.append(np.concatenate((np.array(syn), np.array(gt)), axis=1))
+                    for syn, input_img, input_mask, clip_image, obj_image in zip(syn_images, input_images, input_masks, clip_images, obj_images):
+                        img_list.append(np.concatenate((np.array(syn), np.array(input_img), np.array(input_mask), np.array(clip_image), np.array(obj_image)), axis=1))
                     img_list = np.concatenate(img_list, axis=0)
                     Image.fromarray(img_list).save(os.path.join(args.output_dir, f"{str(global_step).zfill(5)}.jpg"))
-                    # 保存验证集的loss
-                    logger.info("验证中，请稍后.......")
-                    mapper.eval()
-                    validate_loss(val_dataloader, vae, noise_scheduler, image_encoder, text_encoder, mapper, unet, accelerator, global_step,logger)
-                    mapper.train()
-                    logs = {"loss_mle_avg_train": loss_mse_avg/args.save_steps, "loss_reg_avg_train": loss_reg_avg/args.save_steps}
-                    logger.info(logs)
-                    logger.info("验证完成，继续训练.......")
-                    accelerator.log(logs, step=global_step)
-                    loss_mse_avg = 0
-                    loss_reg_avg = 0
-                    
-                    
+
             logs = {"loss_mle": loss_mle.detach().item(), "loss_reg": loss_reg.detach().item(),  "lr": lr_scheduler.get_last_lr()[0]}
             progress_bar.set_postfix(**logs)
             accelerator.log(logs, step=global_step)
-            
 
             if global_step >= args.max_train_steps:
                 break
-        
+
         accelerator.wait_for_everyone()
 
     if accelerator.is_main_process:
-        save_progress(mapper, accelerator, args)
+        save_progress(mapper_local, accelerator, args)
 
     accelerator.end_training()
 

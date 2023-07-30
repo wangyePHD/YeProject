@@ -182,7 +182,7 @@ def parse_args():
     parser.add_argument(
         "--resolution_H",
         type=int,
-        default=384,
+        default=512,
         help=(
             "The resolution for input images, all the images in the train/validation dataset will be resized to this"
             " resolution"
@@ -192,7 +192,7 @@ def parse_args():
     parser.add_argument(
         "--resolution_W",
         type=int,
-        default=896,
+        default=512,
         help=(
             "The resolution for input images, all the images in the train/validation dataset will be resized to this"
             " resolution"

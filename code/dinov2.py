@@ -8,10 +8,10 @@ def load_image(path):
     img = Image.open(path).convert('RGB')
     return img
 
-path = "/home/wangye/YeProject/openimage-v6/car/data/0d27a651277e9ad2.jpg"
+path = "/home/wangye/YeProject_bak/openimage/fast_verify/train/data/00a4e2347de87aea.jpg"
 img = load_image(path)
-image_processor = AutoImageProcessor.from_pretrained("facebook/dinov2-base")
-model = Dinov2Model.from_pretrained("facebook/dinov2-base")
+image_processor = AutoImageProcessor.from_pretrained("facebook/dinov2-giant")
+model = Dinov2Model.from_pretrained("facebook/dinov2-giant")
 inputs = image_processor(img, return_tensors="pt")
 print(inputs)
 
