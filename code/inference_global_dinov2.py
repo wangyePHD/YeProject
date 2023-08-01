@@ -5,8 +5,8 @@ import torch
 from diffusers import AutoencoderKL, LMSDiscreteScheduler, UNet2DConditionModel
 from PIL import Image
 from transformers import CLIPTextModel, CLIPTokenizer, CLIPVisionModel
-from train_global_dinov2 import Mapper, th2image
-from train_global_dinov2 import inj_forward_text, inj_forward_crossattention, validation
+from train_global_dinov2_base import Mapper, th2image
+from train_global_dinov2_base import inj_forward_text, inj_forward_crossattention, validation
 import torch.nn as nn
 from datasets import CustomDatasetWithBG
 from transformers import AutoImageProcessor, Dinov2Model
@@ -24,6 +24,8 @@ def _pil_from_latents(vae, latents):
 
 
 def pww_load_tools(
+    mapper_input,
+    dino_type,
     device: str = "cuda:0",
     scheduler_type=LMSDiscreteScheduler,
     mapper_model_path: Optional[str] = None,
@@ -52,8 +54,8 @@ def pww_load_tools(
     tokenizer = CLIPTokenizer.from_pretrained("openai/clip-vit-large-patch14", torch_dtype=torch.float16,)
     text_encoder = CLIPTextModel.from_pretrained("openai/clip-vit-large-patch14", torch_dtype=torch.float16,)
     # image_encoder = CLIPVisionModel.from_pretrained("openai/clip-vit-large-patch14", torch_dtype=torch.float16,)
-    image_encoder = Dinov2Model.from_pretrained('facebook/dinov2-base', torch_dtype=torch.float16,)
-
+    
+    image_encoder = Dinov2Model.from_pretrained(dino_type, torch_dtype=torch.float16,)
 
     # Load models and create wrapper for stable diffusion
     for _module in text_encoder.modules():
@@ -68,7 +70,7 @@ def pww_load_tools(
         local_files_only=local_path_only,
     )
 
-    mapper = Mapper(input_dim=768, output_dim=768)
+    mapper = Mapper(input_dim=mapper_input, output_dim=768)
 
     for _name, _module in unet.named_modules():
         if _module.__class__.__name__ == "CrossAttention":
@@ -199,6 +201,22 @@ def parse_args():
         ),
     )
     
+    parser.add_argument(
+        "--mapper_input",
+        type=int,
+        default=768,
+        help=(
+            ""
+        ),
+    )
+    
+    parser.add_argument(
+        "--dino_type",
+        type=str,
+        default="facebook/dinov2-base",
+        help="Suffix of save directory.",
+    )
+    
     args = parser.parse_args()
     return args
 
@@ -210,6 +228,8 @@ if __name__ == "__main__":
     os.makedirs(save_dir, exist_ok=True)
 
     vae, unet, text_encoder, tokenizer, image_encoder, mapper, scheduler = pww_load_tools(
+            args.mapper_input,
+            args.dino_type,
             "cuda:0",
             LMSDiscreteScheduler,
             diffusion_model_path=args.pretrained_model_name_or_path,

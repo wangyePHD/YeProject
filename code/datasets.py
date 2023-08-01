@@ -70,8 +70,8 @@ class CustomDatasetWithBG(Dataset):
         self,
         data_root,
         tokenizer,
-        width=896,
-        height=384,
+        width=512,
+        height=512,
         interpolation="bicubic",
         placeholder_token="*",
         template="a photo of a {}",
@@ -153,17 +153,19 @@ class CustomDatasetWithBG(Dataset):
 
         image_np = np.array(image)
         object_tensor = image_np * mask
+        object_tensor = object_tensor.astype('uint8')
         # covert numpy array to PIL Image
         Image.fromarray(object_tensor.astype('uint8')).save('temp.png')
         
         
-        example["pixel_values"] = self.process(image_np)
-
+        # example["pixel_values"] = self.process(image_np)
+        example["pixel_values"] = self.process(object_tensor)
 
         ref_object_tensor = Image.fromarray(object_tensor.astype('uint8')).resize((224, 224), resample=self.interpolation)
-        ref_image_tenser = Image.fromarray(image_np.astype('uint8')).resize((224, 224), resample=self.interpolation)
+        # ref_image_tenser = Image.fromarray(image_np.astype('uint8')).resize((224, 224), resample=self.interpolation)
         example["pixel_values_obj"] = self.get_tensor_clip()(ref_object_tensor)
-        example["pixel_values_clip"] = self.get_tensor_clip()(ref_image_tenser)
+        # example["pixel_values_clip"] = self.get_tensor_clip()(ref_image_tenser)
+        example["pixel_values_clip"] = self.get_tensor_clip()(ref_object_tensor)
 
         ref_seg_tensor = Image.fromarray(mask.astype('uint8') * 255)
         ref_seg_tensor = self.get_tensor_clip(normalize=False)(ref_seg_tensor)
