@@ -2,11 +2,11 @@ import os
 from typing import Optional, Tuple
 import numpy as np
 import torch
-from diffusers import AutoencoderKL, LMSDiscreteScheduler, UNet2DConditionModel
+from diffusers import AutoencoderKL, LMSDiscreteScheduler, UNet2DConditionModel, ControlNetModel
 from PIL import Image
 from transformers import CLIPTextModel, CLIPTokenizer, CLIPVisionModel
-from train_global_dinov2_base import Mapper, th2image
-from train_global_dinov2_base import inj_forward_text, inj_forward_crossattention, validation
+from train_global_dinov2_giant import Mapper, th2image
+from train_global_dinov2_giant import inj_forward_text, inject_forward_crossattention, validation
 import torch.nn as nn
 from datasets import CustomDatasetWithBG
 from transformers import AutoImageProcessor, Dinov2Model
@@ -29,6 +29,7 @@ def pww_load_tools(
     device: str = "cuda:0",
     scheduler_type=LMSDiscreteScheduler,
     mapper_model_path: Optional[str] = None,
+    controlnet_model_path: Optional[str] = None,
     diffusion_model_path: Optional[str] = None,
     model_token: Optional[str] = None,
 ) -> Tuple[
@@ -70,12 +71,17 @@ def pww_load_tools(
         local_files_only=local_path_only,
     )
 
+    
+    controlnet = ControlNetModel.from_pretrained("lllyasviel/sd-controlnet-canny")
+    controlnet.load_state_dict(torch.load(controlnet_model_path, map_location='cpu'))
+    controlnet.half()
+    
     mapper = Mapper(input_dim=mapper_input, output_dim=768)
 
     for _name, _module in unet.named_modules():
-        if _module.__class__.__name__ == "CrossAttention":
+        if _module.__class__.__name__ == "Attention":
             if 'attn1' in _name: continue
-            _module.__class__.__call__ = inj_forward_crossattention
+            _module.__class__.__call__ = inject_forward_crossattention
 
             shape = _module.to_k.weight.shape
             to_k_global = nn.Linear(shape[1], shape[0], bias=False)
@@ -84,17 +90,18 @@ def pww_load_tools(
             shape = _module.to_v.weight.shape
             to_v_global = nn.Linear(shape[1], shape[0], bias=False)
             mapper.add_module(f'{_name.replace(".", "_")}_to_v', to_v_global)
-
+           
+   
     mapper.load_state_dict(torch.load(mapper_model_path, map_location='cpu'))
     mapper.half()
 
     for _name, _module in unet.named_modules():
         if 'attn1' in _name: continue
-        if _module.__class__.__name__ == "CrossAttention":
+        if _module.__class__.__name__ == "Attention":
             _module.add_module('to_k_global', mapper.__getattr__(f'{_name.replace(".", "_")}_to_k'))
             _module.add_module('to_v_global', mapper.__getattr__(f'{_name.replace(".", "_")}_to_v'))
 
-    vae.to(device), unet.to(device), text_encoder.to(device), image_encoder.to(device), mapper.to(device)
+    vae.to(device), unet.to(device), text_encoder.to(device), image_encoder.to(device), mapper.to(device), controlnet.to(device)
 
     scheduler = scheduler_type(
         beta_start=0.00085,
@@ -107,7 +114,8 @@ def pww_load_tools(
     image_encoder.eval()
     text_encoder.eval()
     mapper.eval()
-    return vae, unet, text_encoder, tokenizer, image_encoder, mapper, scheduler
+    controlnet.eval()
+    return vae, unet, text_encoder, tokenizer, image_encoder, mapper, scheduler, controlnet
 
 
 def parse_args():
@@ -125,6 +133,14 @@ def parse_args():
         type=str,
         required=True,
         help="Path to pretrained global mapping network.",
+    )
+    
+    parser.add_argument(
+        "--pretrained_controlnet_model_path",
+        type=str,
+        default=None,
+        required=True,
+        help="Path to pretrained model or model identifier from huggingface.co/models.",
     )
 
     parser.add_argument(
@@ -159,6 +175,8 @@ def parse_args():
         required=True,
         help="Path to pretrained model or model identifier from huggingface.co/models.",
     )
+    
+   
 
     parser.add_argument(
         "--suffix",
@@ -227,12 +245,13 @@ if __name__ == "__main__":
     save_dir = os.path.join(args.output_dir, f'{args.suffix}_token{args.token_index}')
     os.makedirs(save_dir, exist_ok=True)
 
-    vae, unet, text_encoder, tokenizer, image_encoder, mapper, scheduler = pww_load_tools(
+    vae, unet, text_encoder, tokenizer, image_encoder, mapper, scheduler, controlnet = pww_load_tools(
             args.mapper_input,
             args.dino_type,
             "cuda:0",
             LMSDiscreteScheduler,
             diffusion_model_path=args.pretrained_model_name_or_path,
+            controlnet_model_path=args.pretrained_controlnet_model_path,
             mapper_model_path=args.global_mapper_path,
         )
 
@@ -251,12 +270,13 @@ if __name__ == "__main__":
             continue
         batch["pixel_values"] = batch["pixel_values"].to("cuda:0")
         batch["pixel_values_clip"] = batch["pixel_values_clip"].to("cuda:0").half()
+        batch['conditioning_pixel_values'] = batch['conditioning_pixel_values'].to("cuda:0").half()
         # batch["pixel_values_clip"] = batch["pixel_values_clip"].to("cuda:0")
         
         batch["input_ids"] = batch["input_ids"].to("cuda:0")
         batch["index"] = batch["index"].to("cuda:0").long()
         print(step, batch['text'])
-        syn_images = validation(batch, tokenizer, image_encoder, text_encoder, unet, mapper, vae, batch["pixel_values_clip"].device, 5,
+        syn_images = validation(batch, tokenizer, image_encoder, text_encoder, unet, mapper, vae, controlnet, batch["pixel_values_clip"].device, 5,
                                 token_index=args.token_index, seed=args.seed)
         
         Image.fromarray(np.array(syn_images[0])).save(os.path.join(save_dir, f'{str(step).zfill(5)}_{str(args.seed).zfill(5)}.jpg'))

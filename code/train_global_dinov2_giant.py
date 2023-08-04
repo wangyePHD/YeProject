@@ -14,7 +14,7 @@ from torch.utils.data import Dataset
 from accelerate import Accelerator
 from accelerate.logging import get_logger
 from accelerate.utils import set_seed
-from diffusers import AutoencoderKL, DDPMScheduler, UNet2DConditionModel, LMSDiscreteScheduler
+from diffusers import AutoencoderKL, DDPMScheduler, UNet2DConditionModel, LMSDiscreteScheduler, ControlNetModel
 from diffusers.optimization import get_scheduler
 from huggingface_hub import HfFolder, Repository, whoami
 
@@ -160,60 +160,119 @@ def inj_forward_text(
         attentions=encoder_outputs.attentions,
     )
 
-def inj_forward_crossattention(self, hidden_states, encoder_hidden_states=None, attention_mask=None):
-  
-    context = encoder_hidden_states
-    if context is not None:
-        context_tensor = context["CONTEXT_TENSOR"]
+
+
+
+
+def inject_forward_crossattention(
+    self,
+    hidden_states,
+    encoder_hidden_states=None,
+    attention_mask=None,
+    **cross_attention_kwargs,
+):
+    
+    if not isinstance(encoder_hidden_states, list):
+        return self.processor(
+            self,
+            hidden_states,
+            encoder_hidden_states=encoder_hidden_states,
+            attention_mask=attention_mask,
+            **cross_attention_kwargs, 
+        )
+    
     else:
-        context_tensor = hidden_states
+        encoder_hidden_states = encoder_hidden_states[0]
+        return global_forward_crossattention(self, hidden_states, encoder_hidden_states, attention_mask, **cross_attention_kwargs)
+    
+      
+    # note self-attention: encoder_hidden_states为None; cross-attention: encoder_hidden_states不为None
+def global_forward_crossattention(
+    self,
+    hidden_states,
+    encoder_hidden_states=None,
+    attention_mask=None,
+    temb=None,
+):
+    residual = hidden_states
+    
+    if self.spatial_norm is not None:
+        hidden_states = self.spatial_norm(hidden_states, temb)
 
-    batch_size, sequence_length, _ = hidden_states.shape
+    input_ndim = hidden_states.ndim
 
+    if input_ndim == 4:
+        batch_size, channel, height, width = hidden_states.shape
+        hidden_states = hidden_states.view(batch_size, channel, height * width).transpose(1, 2)
+
+    batch_size, sequence_length, _ = (
+        hidden_states.shape if encoder_hidden_states is None else encoder_hidden_states.shape
+    )
+    attention_mask = self.prepare_attention_mask(attention_mask, sequence_length, batch_size)
+
+    if self.group_norm is not None:
+        hidden_states = self.group_norm(hidden_states.transpose(1, 2)).transpose(1, 2)
+
+    
     query = self.to_q(hidden_states)
-    if context is not None:
-        key = self.to_k_global(context_tensor)
-        value = self.to_v_global(context_tensor)
+    key = None
+    value = None
+    # note define K V self-attention: to_key,to_val, cross-attention：to_global_key,to_global_val     
+    if encoder_hidden_states is None: #note self-attention
+        encoder_hidden_states = hidden_states
+        key = self.to_k(encoder_hidden_states)
+        value = self.to_v(encoder_hidden_states)
+        
+    elif self.norm_cross: #note cross-attention
+        encoder_hidden_states = self.norm_encoder_hidden_states(encoder_hidden_states)
+        key = self.to_k_global(encoder_hidden_states)
+        value = self.to_v_global(encoder_hidden_states)
     else:
-        key = self.to_k(context_tensor)
-        value = self.to_v(context_tensor)
+        key = self.to_k_global(encoder_hidden_states)
+        value = self.to_v_global(encoder_hidden_states)
+        
+    
+        
+    query = self.head_to_batch_dim(query)
+    key = self.head_to_batch_dim(key)
+    value = self.head_to_batch_dim(value)
 
-    dim = query.shape[-1]
-
-    query = self.reshape_heads_to_batch_dim(query)
-    key = self.reshape_heads_to_batch_dim(key)
-    value = self.reshape_heads_to_batch_dim(value)
-
-    attention_scores = torch.matmul(query, key.transpose(-1, -2))
-    attention_scores = attention_scores * self.scale
-
-    attention_probs = attention_scores.softmax(dim=-1)
-
-    hidden_states = torch.matmul(attention_probs, value)
-    hidden_states = self.reshape_batch_dim_to_heads(hidden_states)
+    attention_probs = self.get_attention_scores(query, key, attention_mask)
+    hidden_states = torch.bmm(attention_probs, value)
+    hidden_states = self.batch_to_head_dim(hidden_states)
 
     # linear proj
     hidden_states = self.to_out[0](hidden_states)
     # dropout
     hidden_states = self.to_out[1](hidden_states)
 
-    return hidden_states
+    if input_ndim == 4:
+        hidden_states = hidden_states.transpose(-1, -2).reshape(batch_size, channel, height, width)
 
+    if self.residual_connection:
+        hidden_states = hidden_states + residual
+
+    hidden_states = hidden_states / self.rescale_output_factor
+
+    return hidden_states
 
 import logging
 logging.basicConfig(level=logging.INFO)
 logger = get_logger(__name__)
 
 
-def save_progress(mapper, accelerator, args, step=None):
+def save_progress(mapper, controlnet, accelerator, args, step=None):
     logger.info("Saving embeddings")
 
-    state_dict = accelerator.unwrap_model(mapper).state_dict()
+    state_dict_mapper = accelerator.unwrap_model(mapper).state_dict()
+    state_dict_controlnet = accelerator.unwrap_model(controlnet).state_dict()
 
     if step is not None:
-        torch.save(state_dict, os.path.join(args.output_dir, f"mapper_{str(step).zfill(6)}.pt"))
+        torch.save(state_dict_mapper, os.path.join(args.output_dir, f"mapper_{str(step).zfill(6)}.pt"))
+        torch.save(state_dict_controlnet, os.path.join(args.output_dir, f"controlnet_{str(step).zfill(6)}.pt"))
     else:
-        torch.save(state_dict, os.path.join(args.output_dir, "mapper.pt"))
+        torch.save(state_dict_mapper, os.path.join(args.output_dir, "mapper.pt"))
+        torch.save(state_dict_controlnet, os.path.join(args.output_dir, "controlnet.pt"))
 
 
 def parse_args():
@@ -357,6 +416,13 @@ def parse_args():
             "and an Nvidia Ampere GPU."
         ),
     )
+    
+    parser.add_argument(
+        "--controlnet_model_name_or_path",
+        type=str,
+        default="lllyasviel/sd-controlnet-canny"
+    )
+    
     parser.add_argument("--local_rank", type=int, default=-1, help="For distributed training: local_rank")
 
     args = parser.parse_args()
@@ -394,7 +460,7 @@ def th2image(image):
 
 
 @torch.no_grad()
-def validation(example, tokenizer, image_encoder, text_encoder, unet, mapper, vae, device, guidance_scale, token_index='full', seed=None):
+def validation(example, tokenizer, image_encoder, text_encoder, unet, mapper, vae, controlnet, device, guidance_scale, token_index='full', seed=None):
     scheduler = LMSDiscreteScheduler(
         beta_start=0.00085,
         beta_end=0.012,
@@ -427,8 +493,6 @@ def validation(example, tokenizer, image_encoder, text_encoder, unet, mapper, va
     placeholder_idx = example["index"]
     image = F.interpolate(example["pixel_values_clip"], (224, 224), mode='bilinear')
 
-   
-    
     image_features = image_encoder(image, output_hidden_states=True).last_hidden_state
     inj_embedding = mapper(image_features)
 
@@ -443,24 +507,34 @@ def validation(example, tokenizer, image_encoder, text_encoder, unet, mapper, va
                                           "inj_index": placeholder_idx})[0]
 
     for t in tqdm(scheduler.timesteps):
+        
         latent_model_input = scheduler.scale_model_input(latents, t)
+        controlnet_image = example['conditioning_pixel_values']
+        down_block_res_samples, mid_block_res_sample = controlnet(
+            latent_model_input,
+            t,
+            encoder_hidden_states=encoder_hidden_states,
+            controlnet_cond=controlnet_image,
+            return_dict=False,
+        )
         
         noise_pred_text = unet(
             latent_model_input,
             t,
-            encoder_hidden_states={
-                "CONTEXT_TENSOR": encoder_hidden_states,
-            }
+            encoder_hidden_states=[encoder_hidden_states],
+            down_block_additional_residuals=[
+                sample for sample in down_block_res_samples
+            ],
+            mid_block_additional_residual=mid_block_res_sample,
         ).sample
 
+        
         latent_model_input = scheduler.scale_model_input(latents, t)
 
         noise_pred_uncond = unet(
             latent_model_input,
             t,
-            encoder_hidden_states={
-                "CONTEXT_TENSOR": uncond_embeddings,
-            }
+            encoder_hidden_states=uncond_embeddings,
         ).sample
 
         noise_pred = noise_pred_uncond + guidance_scale * (
@@ -480,7 +554,7 @@ def validation(example, tokenizer, image_encoder, text_encoder, unet, mapper, va
 
 
 @torch.no_grad()
-def validate_loss(val_dataloader,vae,noise_scheduler,image_encoder,text_encoder,mapper,unet,accelerator,global_step,logger):
+def validate_loss(val_dataloader,vae,noise_scheduler,image_encoder,text_encoder,mapper,unet,accelerator,global_step,logger,controlnet):
     
     # for iteration in val_dataloader
     loss_mle_avg = 0
@@ -511,9 +585,24 @@ def validate_loss(val_dataloader,vae,noise_scheduler,image_encoder,text_encoder,
                                                 "inj_embedding": inj_embedding,
                                                 "inj_index": placeholder_idx.detach()})[0]
         
-        noise_pred = unet(noisy_latents, timesteps, encoder_hidden_states={
-            "CONTEXT_TENSOR": encoder_hidden_states,
-        }).sample
+        controlnet_image = batch['conditioning_pixel_values']
+        down_block_res_samples, mid_block_res_sample = controlnet(
+            noisy_latents,
+            timesteps,
+            encoder_hidden_states=encoder_hidden_states,
+            controlnet_cond=controlnet_image,
+            return_dict=False,
+        )
+        
+        noise_pred = unet(
+            noisy_latents,
+            timesteps,
+            encoder_hidden_states=[encoder_hidden_states],
+            down_block_additional_residuals=[
+                sample for sample in down_block_res_samples
+            ],
+            mid_block_additional_residual=mid_block_res_sample,
+        ).sample
 
         
         loss_mle = F.mse_loss(noise_pred, noise, reduction="none").mean([1, 2, 3]).mean()
@@ -534,7 +623,6 @@ def validate_loss(val_dataloader,vae,noise_scheduler,image_encoder,text_encoder,
 
 def main():
     
-    
     args = parse_args()
     logging_dir = os.path.join(args.output_dir, args.logging_dir)
 
@@ -543,10 +631,8 @@ def main():
         mixed_precision=args.mixed_precision,
         log_with="tensorboard",
         project_dir=logging_dir,
-        
     )
- 
-    
+
     # If passed along, set the training seed now.
     if args.seed is not None:
         set_seed(args.seed)
@@ -592,12 +678,22 @@ def main():
     vae = AutoencoderKL.from_pretrained(args.pretrained_model_name_or_path, subfolder="vae")
     unet = UNet2DConditionModel.from_pretrained(args.pretrained_model_name_or_path, subfolder="unet")
 
+    # note add controlnet
+    if args.controlnet_model_name_or_path:
+        logger.info(f"Loading existing controlnet weights, {args.controlnet_model_name_or_path}")
+        controlnet = ControlNetModel.from_pretrained(args.controlnet_model_name_or_path)
+    else:
+        logger.info("Initializing controlnet weights from unet of Stable Diffusion")
+        controlnet = ControlNetModel.from_unet(unet)
+        
     # replace the forward method of the crossattention to finetune the to_k and to_v layers
-    for _name, _module in unet.named_modules():
-        if _module.__class__.__name__ == "CrossAttention":
-            if 'attn1' in _name: continue
-            _module.__class__.__call__ = inj_forward_crossattention
-
+    for _name, _module in unet.named_modules(): 
+        # note diffusers version 0.19.3 crossattention is not useful, attention is useful
+        if _module.__class__.__name__ == "Attention":
+            if 'attn1' in _name: continue # note self-attention
+            
+            _module.__class__.__call__ = inject_forward_crossattention
+            
             # note SD预训练的权重进行初始化
             shape = _module.to_k.weight.shape
             to_k_global = nn.Linear(shape[1], shape[0], bias=False)
@@ -612,12 +708,13 @@ def main():
             if args.global_mapper_path is None:
                 _module.add_module('to_k_global', to_k_global)
                 _module.add_module('to_v_global', to_v_global)
+                
 
     # note 给cross-attention添加to_k_global, to_v_global，本质上是引入新的参数
     if args.global_mapper_path is not None:
         mapper.load_state_dict(torch.load(args.global_mapper_path, map_location='cpu'))
         for _name, _module in unet.named_modules():
-            if _module.__class__.__name__ == "CrossAttention":
+            if _module.__class__.__name__ == "Attention":
                 if 'attn1' in _name: continue
                 _module.add_module('to_k_global', getattr(mapper, f'{_name.replace(".", "_")}_to_k'))
                 _module.add_module('to_v_global', getattr(mapper, f'{_name.replace(".", "_")}_to_v'))
@@ -630,6 +727,7 @@ def main():
 
     # Unfreeze the mapper
     unfreeze_params(mapper.parameters())
+    unfreeze_params(controlnet.parameters())
     
     if args.scale_lr:
         args.learning_rate = (
@@ -637,8 +735,8 @@ def main():
         )
 
     # Initialize the optimizer
-    optimizer = torch.optim.AdamW(
-        itertools.chain(mapper.parameters()),  # only optimize the embeddings
+    optimizer = torch.optim.AdamW( 
+        itertools.chain(mapper.parameters(), controlnet.parameters()),  # only optimize the embeddings
         lr=args.learning_rate,
         betas=(args.adam_beta1, args.adam_beta2),
         weight_decay=args.adam_weight_decay,
@@ -680,8 +778,8 @@ def main():
         num_training_steps=args.max_train_steps * args.gradient_accumulation_steps,
     )
 
-    mapper, optimizer, train_dataloader, val_dataloader, lr_scheduler = accelerator.prepare(
-        mapper, optimizer, train_dataloader, val_dataloader,lr_scheduler
+    mapper, controlnet, optimizer, train_dataloader, val_dataloader, lr_scheduler = accelerator.prepare(
+        mapper, controlnet, optimizer, train_dataloader, val_dataloader,lr_scheduler
     )
 
     # Move vae, unet, and encoders to device
@@ -694,6 +792,8 @@ def main():
     unet.eval()
     image_encoder.eval()
 
+    mapper.train()
+    controlnet.train()
     # We need to recalculate our total training steps as the size of the training dataloader may have changed.
     num_update_steps_per_epoch = math.ceil(len(train_dataloader) / args.gradient_accumulation_steps)
     if overrode_max_train_steps:
@@ -724,14 +824,15 @@ def main():
     loss_reg_avg = 0
 
     for epoch in range(args.num_train_epochs):
-        mapper.train()
+        
         for step, batch in enumerate(train_dataloader):
             with accelerator.accumulate(mapper):
                 # Convert images to latent space
                
                 latents = vae.encode(batch["pixel_values"]).latent_dist.sample().detach()
                 latents = latents * 0.18215
-
+                
+                
                 # Sample noise that we'll add to the latents
                 noise = torch.randn(latents.shape).to(latents.device)
                 bsz = latents.shape[0]
@@ -756,9 +857,29 @@ def main():
                                                       "inj_embedding": inj_embedding,
                                                       "inj_index": placeholder_idx.detach()})[0]
                 
-                noise_pred = unet(noisy_latents, timesteps, encoder_hidden_states={
-                    "CONTEXT_TENSOR": encoder_hidden_states,
-                }).sample
+
+                # note controlnet processing
+                # note code777-795 refer diffusers train_controlnet.py源码
+                controlnet_image = batch['conditioning_pixel_values']
+                down_block_res_samples, mid_block_res_sample = controlnet(
+                    noisy_latents,
+                    timesteps,
+                    encoder_hidden_states=encoder_hidden_states,
+                    controlnet_cond=controlnet_image,
+                    return_dict=False,
+                )
+                
+                noise_pred = unet(
+                    noisy_latents,
+                    timesteps,
+                    encoder_hidden_states=[encoder_hidden_states],
+                    down_block_additional_residuals=[
+                        sample for sample in down_block_res_samples
+                    ],
+                    mid_block_additional_residual=mid_block_res_sample,
+                ).sample
+                
+                # noise_pred = unet(noisy_latents, timesteps, encoder_hidden_states=encoder_hidden_states).sample
 
                 loss_mle = F.mse_loss(noise_pred, noise, reduction="none").mean([1, 2, 3]).mean()
                 loss_reg = torch.mean(torch.abs(inj_embedding)) * 0.01
@@ -776,15 +897,15 @@ def main():
             loss_mse_avg = loss_mse_avg + loss_mle.detach().item() / args.gradient_accumulation_steps
             loss_reg_avg = loss_reg_avg + loss_reg.detach().item() / args.gradient_accumulation_steps
             
-
+            
             # Checks if the accelerator has performed an optimization step behind the scenes
             if accelerator.sync_gradients:
                 progress_bar.update(1)
                 global_step += 1
                 if global_step % args.save_steps == 0:
                     
-                    save_progress(mapper, accelerator, args, global_step)
-                    syn_images = validation(batch, tokenizer, image_encoder, text_encoder, unet, mapper, vae, batch["pixel_values_clip"].device, 5)
+                    save_progress(mapper, controlnet, accelerator, args, global_step)
+                    syn_images = validation(batch, tokenizer, image_encoder, text_encoder, unet ,mapper,vae,controlnet, batch["pixel_values_clip"].device, 5)
                     gt_images = [th2image(img) for img in batch["pixel_values"]]
                     img_list = []
                     for syn, gt in zip(syn_images, gt_images):
@@ -794,15 +915,17 @@ def main():
                     # 保存验证集的loss
                     logger.info("验证中，请稍后.......")
                     mapper.eval()
-                    validate_loss(val_dataloader, vae, noise_scheduler, image_encoder, text_encoder, mapper, unet, accelerator, global_step,logger)
+                    controlnet.eval()
+                    validate_loss(val_dataloader, vae, noise_scheduler, image_encoder, text_encoder, mapper, unet, accelerator, global_step,logger,controlnet)
                     mapper.train()
+                    controlnet.train()
                     logs = {"loss_mle_avg_train": loss_mse_avg/args.save_steps, "loss_reg_avg_train": loss_reg_avg/args.save_steps}
                     logger.info(logs)
                     logger.info("验证完成，继续训练.......")
                     accelerator.log(logs, step=global_step)
                     loss_mse_avg = 0
                     loss_reg_avg = 0
-                    
+                
                     
             logs = {"loss_mle": loss_mle.detach().item(), "loss_reg": loss_reg.detach().item(),  "lr": lr_scheduler.get_last_lr()[0]}
             progress_bar.set_postfix(**logs)
