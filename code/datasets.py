@@ -80,10 +80,11 @@ class CustomDatasetWithBG(Dataset):
         self.tokenizer = tokenizer
         self.width = width
         self.height = height
+        self.resolution = width
         self.placeholder_token = placeholder_token
 
         self.image_paths = []
-        self.image_paths += [os.path.join(self.data_root, file_path) for file_path in os.listdir(self.data_root) if is_image(file_path) and not 'bg' in file_path]
+        self.image_paths += [os.path.join(self.data_root, file_path) for file_path in os.listdir(self.data_root) if is_image(file_path) and not 'bg' in file_path and not 'hf' in file_path]
 
         self.image_paths = sorted(self.image_paths)
 
@@ -96,6 +97,14 @@ class CustomDatasetWithBG(Dataset):
             "bicubic": PIL_INTERPOLATION["bicubic"],
             "lanczos": PIL_INTERPOLATION["lanczos"],
         }[interpolation]
+        
+        self.conditioning_image_transforms = transforms.Compose(
+        [
+            transforms.Resize(self.resolution, interpolation=transforms.InterpolationMode.BILINEAR),
+            transforms.CenterCrop(self.resolution),
+            transforms.ToTensor(),
+        ]
+        )
 
         self.template = template
 
@@ -140,12 +149,18 @@ class CustomDatasetWithBG(Dataset):
             return_tensors="pt",
         ).input_ids[0]
 
-        image = Image.open(self.image_paths[i % self.num_images])
+        img = self.image_paths[i % self.num_images]
+        image = Image.open(img)
 
         mask_path = self.image_paths[i % self.num_images].replace('.jpeg', '.png').replace('.jpg', '.png').replace('.JPEG', '.png')[:-4] + '_bg.png'
         mask = np.array(Image.open(mask_path))
+        mask = np.where(mask > 0, 1, 0) 
         
-        mask = np.where(mask > 0, 1, 0)
+        hf_map = img.replace('.jpeg', '.png').replace('.jpg', '.png').replace('.JPEG', '.png')[:-4] + '_hf.jpg'
+        hf_map = os.path.join(self.data_root,'hf_map',hf_map)
+        hf_map = Image.open(hf_map).convert('RGB')
+        hf_map = self.conditioning_image_transforms(hf_map)
+        
         
         
         if not image.mode == "RGB":
@@ -160,7 +175,7 @@ class CustomDatasetWithBG(Dataset):
         
         # example["pixel_values"] = self.process(image_np)
         example["pixel_values"] = self.process(object_tensor)
-
+        example["conditioning_pixel_values"] = hf_map
         ref_object_tensor = Image.fromarray(object_tensor.astype('uint8')).resize((224, 224), resample=self.interpolation)
         # ref_image_tenser = Image.fromarray(image_np.astype('uint8')).resize((224, 224), resample=self.interpolation)
         example["pixel_values_obj"] = self.get_tensor_clip()(ref_object_tensor)
@@ -188,6 +203,7 @@ class OpenImagesDataset(Dataset):
         self.tokenizer = tokenizer
         self.width = width
         self.height = height
+        self.resolution = width
         self.placeholder_token = placeholder_token
 
         self.random_trans = A.Compose([
@@ -197,6 +213,15 @@ class OpenImagesDataset(Dataset):
             A.Blur(p=0.3),
             A.ElasticTransform(p=0.3)
         ])
+        
+        # note refer diffuser datasets load_dataset source code
+        self.conditioning_image_transforms = transforms.Compose(
+        [
+            transforms.Resize(self.resolution, interpolation=transforms.InterpolationMode.BILINEAR),
+            transforms.CenterCrop(self.resolution),
+            transforms.ToTensor(),
+        ]
+    )
         
         self.img_list = []
         imgtxt_file = os.path.join(data_root, 'mask_box.txt')
@@ -278,7 +303,7 @@ class OpenImagesDataset(Dataset):
 
         img = self.img_list[i % self.num_images]
   
-
+        # load image
         img_path = os.path.join(self.data_root, 'data', img)
         img_p = Image.open(img_path).convert("RGB")
         img_p_np = np.array(img_p)
@@ -288,18 +313,20 @@ class OpenImagesDataset(Dataset):
         mask_path = os.path.join(self.data_root, 'mask', mask)
         mask = np.array(Image.open(mask_path))
         mask = np.where(mask > 0, 1, 0)
+
+        # load conditioning image
+        hf_map = img.replace('.jpeg', '.png').replace('.jpg', '.png').replace('.JPEG', '.png')[:-4] + '_hf.jpg'
+        hf_map = os.path.join(self.data_root,'hf_map',hf_map)
+        hf_map = Image.open(hf_map).convert('RGB')
+        hf_map = self.conditioning_image_transforms(hf_map)
         
         image_tensor = img_p_np * mask
         image_tensor = image_tensor.astype('uint8')
         
         # save image_tensor to PIL image for debuging and checking
         Image.fromarray(image_tensor).save('temp.png')  
-              
-        # l_x, l_y, r_x, r_y,_ = bbox_sample
-        # l_x, l_y, r_x, r_y = int(l_x), int(l_y), int(r_x), int(r_y)
-        # note cut out the subject according to the bbox 
-        # image_tensor = img_p_np[l_y:r_y,l_x:r_x,:]
         
+        example["conditioning_pixel_values"] = hf_map
         example["pixel_values"] = self.process(image_tensor)
         ref_image_tensor = self.random_trans(image=image_tensor)
         ref_image_tensor = Image.fromarray(ref_image_tensor["image"])

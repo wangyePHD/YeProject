@@ -1,8 +1,11 @@
 import cv2
 import numpy as np
 import os
+from tqdm import tqdm
 
-data_dir = './data'
+data_dir = '/home/wangye/YeProject_bak/openimage/v1/test_data/mixed'
+mask_dir = '/home/wangye/YeProject_bak/openimage/v1/test_data/mixed'
+output_dir = '/home/wangye/YeProject_bak/openimage/v1/test_data/mixed'
 
 
 def work(img_name):
@@ -10,9 +13,8 @@ def work(img_name):
     # RGB: x.jpg
     # Mask: x_bg.png
     # HF-MAP: x_hf.jpg
-
     img = cv2.imread(f'{data_dir}/{img_name}.jpg')
-    mask = cv2.imread(f'{data_dir}/{img_name}_bg.png')
+    mask = cv2.imread(f'{mask_dir}/{img_name}_bg.png')
     mask = cv2.cvtColor(mask, cv2.COLOR_BGR2GRAY)
 
     zero = np.zeros(img.shape[0:3], dtype="uint8")
@@ -37,11 +39,11 @@ def work(img_name):
     # cv2.imshow('grad', grad)
     # cv2.imshow('result', result)
 
-    cv2.imwrite(f'./result/{img_name}_hf.jpg', result)
+    cv2.imwrite(f'{output_dir}/{img_name}_hf.jpg', result)
 
 
 names = os.listdir(data_dir)
 names = [x.split('.')[0] for x in names if x.find('_') == -1]
 
-for x in names:
+for x in tqdm(names):
     work(x)
